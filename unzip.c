@@ -994,7 +994,7 @@ static int unzCheckCurrentFileCoherencyHeader(unz64_internal *s, uint32_t *psize
 #ifdef HAVE_BZIP2
         if (compression_method != Z_BZIP2ED)
 #endif
-            err = UNZ_BADZIPFILE;
+            err = UNZ_BADCOMPMETHOD;
     }
 
     if (unzReadUInt32(&s->z_filefunc, s->filestream, &value32) != UNZ_OK) /* date/time */
@@ -1039,6 +1039,7 @@ extern int ZEXPORT unzOpenCurrentFile3(unzFile file, int *method, int *level, in
     uint16_t size_local_extrafield = 0;
     uint32_t size_variable = 0;
     int err = UNZ_OK;
+	int checkResult = UNZ_OK;
 #ifndef NOUNCRYPT
     char source[12];
 #else
@@ -1054,8 +1055,10 @@ extern int ZEXPORT unzOpenCurrentFile3(unzFile file, int *method, int *level, in
     if (s->pfile_in_zip_read != NULL)
         unzCloseCurrentFile(file);
 
-    if (unzCheckCurrentFileCoherencyHeader(s, &size_variable, &offset_local_extrafield, &size_local_extrafield) != UNZ_OK)
-        return UNZ_BADZIPFILE;
+	checkResult = unzCheckCurrentFileCoherencyHeader(s, &size_variable, &offset_local_extrafield, &size_local_extrafield);
+
+    if (checkResult != UNZ_OK)
+        return checkResult == UNZ_BADCOMPMETHOD ? UNZ_BADCOMPMETHOD : UNZ_BADZIPFILE;
     
     compression_method = s->cur_file_info.compression_method;
 #ifdef HAVE_AES
@@ -1089,7 +1092,7 @@ extern int ZEXPORT unzOpenCurrentFile3(unzFile file, int *method, int *level, in
         if (compression_method != Z_BZIP2ED)
 #endif
         {
-            return UNZ_BADZIPFILE;
+            return UNZ_BADCOMPMETHOD;
         }
     }
     

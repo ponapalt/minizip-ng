@@ -58,6 +58,7 @@ typedef voidp unzFile;
 #define UNZ_INTERNALERROR               (-104)
 #define UNZ_CRCERROR                    (-105)
 #define UNZ_BADPASSWORD                 (-106)
+#define UNZ_BADCOMPMETHOD               (-180)
 
 /* unz_global_info structure contain global data about the ZIPfile
    These data comes from the end of central dir */
