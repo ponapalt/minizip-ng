@@ -62,7 +62,7 @@ uint8_t update_keys(uint32_t *pkeys, const z_crc_t *pcrc_32_tab, int32_t c)
 {
     (*(pkeys+0)) = (uint32_t)CRC32((*(pkeys+0)), c);
     (*(pkeys+1)) += (*(pkeys+0)) & 0xff;
-    (*(pkeys+1)) = (*(pkeys+1)) * 134775813L + 1;
+    (*(pkeys+1)) = (*(pkeys+1)) * 134775813UL + 1;
     {
         register int32_t keyshift = (int32_t)((*(pkeys + 1)) >> 24);
         (*(pkeys+2)) = (uint32_t)CRC32((*(pkeys+2)), keyshift);
@@ -72,9 +72,9 @@ uint8_t update_keys(uint32_t *pkeys, const z_crc_t *pcrc_32_tab, int32_t c)
 
 void init_keys(const char *passwd, uint32_t *pkeys, const z_crc_t *pcrc_32_tab)
 {
-    *(pkeys+0) = 305419896L;
-    *(pkeys+1) = 591751049L;
-    *(pkeys+2) = 878082192L;
+    *(pkeys+0) = 305419896UL;
+    *(pkeys+1) = 591751049UL;
+    *(pkeys+2) = 878082192UL;
     while (*passwd != 0)
     {
         update_keys(pkeys, pcrc_32_tab, *passwd);
