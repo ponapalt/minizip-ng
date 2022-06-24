@@ -199,6 +199,20 @@ int miniunz_extract_currentfile(unzFile uf, int opt_extract_without_path, int *p
     else
         write_filename = filename_inzip;
 
+    if (write_filename[0]!='\0')
+    {
+        const char* relative_check = write_filename;
+        while (relative_check[1]!='\0')
+        {
+            if (relative_check[0]=='.' && relative_check[1]=='.')
+                write_filename = relative_check;
+            relative_check++;
+        }
+    }
+
+    while (write_filename[0]=='/' || write_filename[0]=='.')
+        write_filename++;
+
     /* Determine if the file should be overwritten or not and ask the user if needed */
     if ((err == UNZ_OK) && (*popt_overwrite == 0) && (check_file_exists(write_filename)))
     {

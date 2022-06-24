@@ -330,84 +330,55 @@ static int zipReadUInt8(const zlib_filefunc64_32_def *pzlib_filefunc_def, voidpf
 
 static int zipReadUInt16(const zlib_filefunc64_32_def *pzlib_filefunc_def, voidpf filestream, uint16_t *value)
 {
-    uint16_t x = 0;
-    uint8_t c = 0;
-    int err = ZIP_OK;
-
-    err = zipReadUInt8(pzlib_filefunc_def, filestream, &c);
-    x = (uint16_t)c;
-    if (err == ZIP_OK)
-        err = zipReadUInt8(pzlib_filefunc_def, filestream, &c);
-    x += ((uint16_t)c) << 8;
-
-    if (err == ZIP_OK)
-        *value = x;
-    else
-        *value = 0;
-    return err;
+    uint8_t c[2] = {0,0};
+    if (ZREAD64(*pzlib_filefunc_def, filestream, c, 2) == 2)
+    {
+        *value = (uint16_t)c[0];
+        *value |= ((uint16_t)c[1]) << 8;
+        return ZIP_OK;
+    }
+    *value = 0;
+    if (ZERROR64(*pzlib_filefunc_def, filestream))
+        return ZIP_ERRNO;
+    return ZIP_EOF;
 }
 
 static int zipReadUInt32(const zlib_filefunc64_32_def *pzlib_filefunc_def, voidpf filestream, uint32_t *value)
 {
-    uint32_t x = 0;
-    uint8_t c = 0;
-    int err = ZIP_OK;
-
-    err = zipReadUInt8(pzlib_filefunc_def, filestream, &c);
-    x = (uint32_t)c;
-    if (err == ZIP_OK)
-        err = zipReadUInt8(pzlib_filefunc_def, filestream, &c);
-    x += ((uint32_t)c) << 8;
-    if (err == ZIP_OK)
-        err = zipReadUInt8(pzlib_filefunc_def, filestream, &c);
-    x += ((uint32_t)c) << 16;
-    if (err == ZIP_OK)
-        err = zipReadUInt8(pzlib_filefunc_def, filestream, &c);
-    x += ((uint32_t)c) << 24;
-
-    if (err == ZIP_OK)
-        *value = x;
-    else
-        *value = 0;
-    return err;
+    uint8_t c[4] = {0,0,0,0};
+    if (ZREAD64(*pzlib_filefunc_def, filestream, c, 4) == 4)
+    {
+        *value = (uint32_t)c[0];
+        *value |= ((uint32_t)c[1]) << 8;
+        *value |= ((uint32_t)c[2]) << 16;
+        *value |= ((uint32_t)c[3]) << 24;
+        return ZIP_OK;
+    }
+    *value = 0;
+    if (ZERROR64(*pzlib_filefunc_def, filestream))
+        return ZIP_ERRNO;
+    return ZIP_EOF;
 }
 
 static int zipReadUInt64(const zlib_filefunc64_32_def *pzlib_filefunc_def, voidpf filestream, uint64_t *value)
 {
-    uint64_t x = 0;
-    uint8_t c = 0;
-    int err = ZIP_OK;
-
-    err = zipReadUInt8(pzlib_filefunc_def, filestream, &c);
-    x = (uint64_t)c;
-    if (err == ZIP_OK)
-        err = zipReadUInt8(pzlib_filefunc_def, filestream, &c);
-    x += ((uint64_t)c) << 8;
-    if (err == ZIP_OK)
-        err = zipReadUInt8(pzlib_filefunc_def, filestream, &c);
-    x += ((uint64_t)c) << 16;
-    if (err == ZIP_OK)
-        err = zipReadUInt8(pzlib_filefunc_def, filestream, &c);
-    x += ((uint64_t)c) << 24;
-    if (err == ZIP_OK)
-        err = zipReadUInt8(pzlib_filefunc_def, filestream, &c);
-    x += ((uint64_t)c) << 32;
-    if (err == ZIP_OK)
-        err = zipReadUInt8(pzlib_filefunc_def, filestream, &c);
-    x += ((uint64_t)c) << 40;
-    if (err == ZIP_OK)
-        err = zipReadUInt8(pzlib_filefunc_def, filestream, &c);
-    x += ((uint64_t)c) << 48;
-    if (err == ZIP_OK)
-        err = zipReadUInt8(pzlib_filefunc_def, filestream, &c);
-    x += ((uint64_t)c) << 56;
-
-    if (err == ZIP_OK)
-        *value = x;
-    else
-        *value = 0;
-
-    return err;
+    uint8_t c[8] = {0,0,0,0,0,0,0,0};
+    if (ZREAD64(*pzlib_filefunc_def, filestream, c, 8) == 8)
+    {
+        *value = (uint64_t)c[0];
+        *value |= ((uint64_t)c[1]) << 8;
+        *value |= ((uint64_t)c[2]) << 16;
+        *value |= ((uint64_t)c[3]) << 24;
+        *value |= ((uint64_t)c[4]) << 32;
+        *value |= ((uint64_t)c[5]) << 40;
+        *value |= ((uint64_t)c[6]) << 48;
+        *value |= ((uint64_t)c[7]) << 56;
+        return ZIP_OK;
+    }
+    *value = 0;
+    if (ZERROR64(*pzlib_filefunc_def, filestream))
+        return ZIP_ERRNO;
+    return ZIP_EOF;
 }
 
 /* Gets the amount of bytes left to write to the current disk for spanning archives */
@@ -952,6 +923,17 @@ extern int ZEXPORT zipOpenNewFileInZip_internal(zipFile file,
         (method != Z_BZIP2ED) &&
 #endif
         (method != Z_DEFLATED))
+        return ZIP_PARAMERROR;
+        
+    // The filename and comment length must fit in 16 bits.
+    if ((filename!=NULL) && (strlen(filename)>UINT16_MAX))
+        return ZIP_PARAMERROR;
+    if ((comment!=NULL) && (strlen(comment)>UINT16_MAX))
+        return ZIP_PARAMERROR;
+    // The extra field length must fit in 16 bits. If the member also requires
+    // a Zip64 extra block, that will also need to fit within that 16-bit
+    // length, but that will be checked for later.
+    if ((size_extrafield_local>UINT16_MAX) || (size_extrafield_global>UINT16_MAX))
         return ZIP_PARAMERROR;
 
     zi = (zip64_internal*)file;
@@ -1900,7 +1882,7 @@ extern int ZEXPORT zipClose2_64(zipFile file, const char *global_comment, uint16
     pos = centraldir_pos_inzip - zi->add_position_when_writting_offset;
 
     /* Write the ZIP64 central directory header */
-    if (pos >= UINT32_MAX || zi->number_entry > UINT16_MAX)
+    if (pos >= UINT32_MAX || zi->number_entry >= UINT16_MAX)
     {
         uint64_t zip64_eocd_pos_inzip = ZTELL64(zi->z_filefunc, zi->filestream);
         uint32_t zip64_datasize = 44;

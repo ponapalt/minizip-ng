@@ -38,6 +38,11 @@
 #    if (_MSC_VER >= 1400) && (!(defined(NO_MSCVER_FILE64_FUNC)))
 #      define ftello64 _ftelli64
 #      define fseeko64 _fseeki64
+#    elif (_MSC_VER >= 1200) && (!(defined(NO_MSCVER_FILE64_FUNC)))
+__int64 __cdecl _ftelli64(FILE *);
+int __cdecl _fseeki64(FILE *, __int64, int);
+#      define ftello64 _ftelli64
+#      define fseeko64 _fseeki64
 #    else /* old MSC */
 #      define ftello64 ftell
 #      define fseeko64 fseek
