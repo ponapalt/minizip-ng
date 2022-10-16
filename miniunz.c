@@ -112,6 +112,10 @@ int miniunz_list(unzFile uf)
         {
             string_method = "BZip2 ";
         }
+		else if ( file_info.compression_method == Z_LZMAED)
+		{
+            string_method = "LZMA ";
+		}
         else
             string_method = "Unkn. ";
 

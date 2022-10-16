@@ -17,6 +17,7 @@
 #ifndef _ZIP_H
 #define _ZIP_H
 
+#define HAVE_LZMA
 #define HAVE_BZIP2
 #define HAVE_AES
 
@@ -37,6 +38,7 @@ extern "C" {
 #endif
 
 #define Z_BZIP2ED 12
+#define Z_LZMAED 14
 
 #if defined(STRICTZIP) || defined(STRICTZIPUNZIP)
 /* like the STRICT of WIN32, we define a pointer that cannot be converted
