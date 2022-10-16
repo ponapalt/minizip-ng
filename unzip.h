@@ -19,6 +19,7 @@
 #ifndef _UNZ_H
 #define _UNZ_H
 
+#define HAVE_LZMA
 #define HAVE_BZIP2
 #define HAVE_AES
 
@@ -38,7 +39,12 @@ extern "C" {
 #include "bzlib/bzlib.h"
 #endif
 
+#ifdef HAVE_LZMA
+#include "lzma/LzmaDec.h"
+#endif
+
 #define Z_BZIP2ED 12
+#define Z_LZMAED  14
 
 #if defined(STRICTUNZIP) || defined(STRICTZIPUNZIP)
 /* like the STRICT of WIN32, we define a pointer that cannot be converted

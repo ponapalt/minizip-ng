@@ -96,6 +96,11 @@ typedef struct
 #ifdef HAVE_BZIP2
     bz_stream bstream;                  /* bzLib stream structure for bziped */
 #endif
+#ifdef HAVE_LZMA
+	CLzmaDec lzma_stream;
+	ISzAlloc lzma_alloc;
+	int      lzma_init;
+#endif
 #ifdef HAVE_APPLE_COMPRESSION
     compression_stream astream;         /* libcompression stream structure */
 #endif
@@ -994,6 +999,9 @@ static int unzCheckCurrentFileCoherencyHeader(unz64_internal *s, uint32_t *psize
 #ifdef HAVE_BZIP2
         if (compression_method != Z_BZIP2ED)
 #endif
+#ifdef HAVE_LZMA
+        if (compression_method != Z_LZMAED)
+#endif
             err = UNZ_BADCOMPMETHOD;
     }
 
@@ -1030,6 +1038,17 @@ static int unzCheckCurrentFileCoherencyHeader(unz64_internal *s, uint32_t *psize
   Open for reading data the current file in the zipfile.
   If there is no error and the file is opened, the return value is UNZ_OK.
 */
+#ifdef HAVE_LZMA
+static void* unzLzmaAlloc(ISzAllocPtr p, size_t size)
+{
+	return malloc(size);
+}
+static void unzLzmaFree(ISzAllocPtr p, void *addr) {
+	free(addr);
+}
+#endif
+
+
 extern int ZEXPORT unzOpenCurrentFile3(unzFile file, int *method, int *level, int raw, const char *password)
 {
     unz64_internal *s = NULL;
@@ -1091,9 +1110,10 @@ extern int ZEXPORT unzOpenCurrentFile3(unzFile file, int *method, int *level, in
 #ifdef HAVE_BZIP2
         if (compression_method != Z_BZIP2ED)
 #endif
-        {
+#ifdef HAVE_LZMA
+        if (compression_method != Z_LZMAED)
+#endif
             return UNZ_BADCOMPMETHOD;
-        }
     }
     
     pfile_in_zip_read_info = (file_in_zip64_read_info_s*)ALLOC(sizeof(file_in_zip64_read_info_s));
@@ -1159,6 +1179,19 @@ extern int ZEXPORT unzOpenCurrentFile3(unzFile file, int *method, int *level, in
                 TRYFREE(pfile_in_zip_read_info);
                 return err;
             }
+#else
+            pfile_in_zip_read_info->raw = 1;
+#endif
+        }
+        if (compression_method == Z_LZMAED)
+        {
+#ifdef HAVE_LZMA
+			memset(&pfile_in_zip_read_info->lzma_stream,0,sizeof(pfile_in_zip_read_info->lzma_stream));
+            LzmaDec_Construct(&pfile_in_zip_read_info->lzma_stream);
+			pfile_in_zip_read_info->lzma_init = 0;
+			pfile_in_zip_read_info->lzma_alloc.Alloc = unzLzmaAlloc;
+			pfile_in_zip_read_info->lzma_alloc.Free = unzLzmaFree;
+            pfile_in_zip_read_info->stream_initialised = Z_LZMAED;
 #else
             pfile_in_zip_read_info->raw = 1;
 #endif
@@ -1288,6 +1321,7 @@ extern int ZEXPORT unzOpenCurrentFile2(unzFile file, int *method, int *level, in
    return the number of byte copied if some bytes are copied
    return 0 if the end of file was reached
    return <0 with error code if there is an error (UNZ_ERRNO for IO error, or zLib error for uncompress error) */
+
 extern int ZEXPORT unzReadCurrentFile(unzFile file, voidp buf, uint32_t len)
 {
     unz64_internal *s = NULL;
@@ -1467,6 +1501,108 @@ extern int ZEXPORT unzReadCurrentFile(unzFile file, voidp buf, uint32_t len)
                 return (read == 0) ? UNZ_EOF : read;
             if (err != BZ_OK)
                 break;
+#endif
+        }
+        else if (s->pfile_in_zip_read->compression_method == Z_LZMAED)
+        {
+#ifdef HAVE_LZMA
+			ELzmaStatus lzma_state = LZMA_STATUS_NOT_FINISHED;
+
+			uint32_t in_bytes = 0;
+            uint32_t out_bytes = 0;
+            const uint8_t *buf_before = NULL;
+			ELzmaFinishMode fmode = LZMA_FINISH_ANY;
+			SRes lzma_err;
+			unsigned short version_major;
+			unsigned short version_minor;
+			unsigned short propsize;
+
+#define LZMA_MAGIC_SIZE 4
+
+			if ( ! s->pfile_in_zip_read->lzma_init ) {
+				//magic header
+				if ( s->pfile_in_zip_read->stream.avail_in < LZMA_MAGIC_SIZE ) {
+					return Z_DATA_ERROR;
+				}
+
+				version_major = s->pfile_in_zip_read->stream.next_in[0];
+				version_minor = s->pfile_in_zip_read->stream.next_in[1];
+				propsize = s->pfile_in_zip_read->stream.next_in[2] | (s->pfile_in_zip_read->stream.next_in[3] << 8);
+
+				s->pfile_in_zip_read->stream.next_in += LZMA_MAGIC_SIZE;
+				s->pfile_in_zip_read->stream.total_in += LZMA_MAGIC_SIZE;
+				s->pfile_in_zip_read->stream.avail_in -= LZMA_MAGIC_SIZE;
+
+				//prop header
+				if ( s->pfile_in_zip_read->stream.avail_in < propsize ) {
+					return Z_DATA_ERROR;
+				}
+				if ( LzmaDec_Allocate(&s->pfile_in_zip_read->lzma_stream,
+					s->pfile_in_zip_read->stream.next_in,
+					propsize,
+					&s->pfile_in_zip_read->lzma_alloc) != SZ_OK ) {
+
+					LzmaDec_Free(&s->pfile_in_zip_read->lzma_stream,&s->pfile_in_zip_read->lzma_alloc);
+					return Z_DATA_ERROR;
+				}
+				s->pfile_in_zip_read->stream.next_in += propsize;
+				s->pfile_in_zip_read->stream.total_in += propsize;
+				s->pfile_in_zip_read->stream.avail_in -= propsize;
+
+				LzmaDec_Init(&s->pfile_in_zip_read->lzma_stream);
+
+				s->pfile_in_zip_read->lzma_init = 1;
+			}
+
+            in_bytes = s->pfile_in_zip_read->stream.avail_in;
+            out_bytes = s->pfile_in_zip_read->stream.avail_out;
+            buf_before = (const uint8_t*)s->pfile_in_zip_read->stream.next_out;
+
+			if ( s->pfile_in_zip_read->rest_read_uncompressed <= out_bytes ) {
+				fmode = LZMA_FINISH_END;
+				out_bytes = (unsigned long)s->pfile_in_zip_read->rest_read_uncompressed;
+			}
+
+            lzma_err = LzmaDec_DecodeToBuf(&s->pfile_in_zip_read->lzma_stream,
+				s->pfile_in_zip_read->stream.next_out,
+				&out_bytes,
+				s->pfile_in_zip_read->stream.next_in,
+				&in_bytes,
+				fmode,&lzma_state);
+
+            if (lzma_err != SZ_OK) {
+				if ( lzma_err == SZ_ERROR_MEM ) {
+					err = Z_MEM_ERROR;
+				}
+				else if ( lzma_err == SZ_ERROR_INPUT_EOF || lzma_err == SZ_ERROR_OUTPUT_EOF || lzma_err == SZ_ERROR_READ || lzma_err == SZ_ERROR_WRITE ) {
+					err = Z_STREAM_ERROR;
+				}
+				else {
+					err = Z_DATA_ERROR;
+				}
+                break;
+			}
+
+            s->pfile_in_zip_read->total_out_64 += out_bytes;
+            s->pfile_in_zip_read->rest_read_uncompressed -= out_bytes;
+            s->pfile_in_zip_read->crc32 =
+                (uint32_t)crc32(s->pfile_in_zip_read->crc32,buf_before, (uint32_t)out_bytes);
+
+			s->pfile_in_zip_read->stream.total_in += (uint32_t)in_bytes;
+			s->pfile_in_zip_read->stream.next_in += (uint32_t)in_bytes;
+			s->pfile_in_zip_read->stream.avail_in -= (uint32_t)in_bytes;
+			s->pfile_in_zip_read->stream.total_out += (uint32_t)out_bytes;
+			s->pfile_in_zip_read->stream.next_out += (uint32_t)out_bytes;
+			s->pfile_in_zip_read->stream.avail_out -= (uint32_t)out_bytes;
+
+            read += (uint32_t)out_bytes;
+
+            if (lzma_state == LZMA_STATUS_FINISHED_WITH_MARK || lzma_state == LZMA_STATUS_MAYBE_FINISHED_WITHOUT_MARK) {
+				return (read == 0) ? UNZ_EOF : read;
+			}
+			if ( s->pfile_in_zip_read->rest_read_uncompressed == 0 ) {
+				return (read == 0) ? UNZ_EOF : read;
+			}
 #endif
         }
 #ifdef HAVE_APPLE_COMPRESSION
@@ -1652,8 +1788,16 @@ extern int ZEXPORT unzCloseCurrentFile(unzFile file)
         
     }
 #ifdef HAVE_BZIP2
-    else if (pfile_in_zip_read_info->stream_initialised == Z_BZIP2ED)
+    else if (pfile_in_zip_read_info->stream_initialised == Z_BZIP2ED) {
         BZ2_bzDecompressEnd(&pfile_in_zip_read_info->bstream);
+	}
+#endif
+#ifdef HAVE_LZMA
+    else if (pfile_in_zip_read_info->stream_initialised == Z_LZMAED) {
+		if ( s->pfile_in_zip_read->lzma_init ) {
+			LzmaDec_Free(&s->pfile_in_zip_read->lzma_stream,&s->pfile_in_zip_read->lzma_alloc);
+		}
+	}
 #endif
 
     pfile_in_zip_read_info->stream_initialised = 0;
