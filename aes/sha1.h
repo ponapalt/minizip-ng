@@ -21,14 +21,14 @@ Issue Date: 20/12/2007
 #ifndef _SHA1_H
 #define _SHA1_H
 
-#define SHA_1
-
 /* define for bit or byte oriented SHA   */
 #if 1
 #  define SHA1_BITS 0   /* byte oriented */
 #else
 #  define SHA1_BITS 1   /* bit oriented  */
 #endif
+
+#define SHA_1
 
 #include <stdlib.h>
 #include "brg_types.h"

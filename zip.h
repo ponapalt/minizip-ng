@@ -17,6 +17,9 @@
 #ifndef _ZIP_H
 #define _ZIP_H
 
+#define HAVE_BZIP2
+#define HAVE_AES
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -30,7 +33,7 @@ extern "C" {
 #endif
 
 #ifdef HAVE_BZIP2
-#  include "bzlib.h"
+#  include "bzlib/bzlib.h"
 #endif
 
 #define Z_BZIP2ED 12

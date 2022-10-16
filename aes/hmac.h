@@ -24,45 +24,53 @@ This is an implementation of HMAC, the FIPS standard keyed hash function
 #define _HMAC2_H
 
 #include <stdlib.h>
-#include <string.h>
+#include <memory.h>
 
 #if defined(__cplusplus)
 extern "C"
 {
 #endif
 
-#include "sha1.h"
+#if !defined(_SHA1_H)
+#  include "sha1.h"
+#endif
 
-#if defined(SHA_224) || defined(SHA_256) || defined(SHA_384) || defined(SHA_512)
-#define HMAC_MAX_OUTPUT_SIZE SHA2_MAX_DIGEST_SIZE
-#define HMAC_MAX_BLOCK_SIZE SHA2_MAX_BLOCK_SIZE
-#else 
+#if !defined(_SHA2_H)
+#  include "sha2.h"
+#endif
+
+#if !defined(_SHA2_H)
+#define HMAC_BLOCK_SIZE      SHA1_BLOCK_SIZE
 #define HMAC_MAX_OUTPUT_SIZE SHA1_DIGEST_SIZE
-#define HMAC_MAX_BLOCK_SIZE SHA1_BLOCK_SIZE
+#else
+#define HMAC_BLOCK_SIZE      SHA2_MAX_BLOCK_SIZE  
+#define HMAC_MAX_OUTPUT_SIZE SHA2_MAX_DIGEST_SIZE
 #endif
 
 #define HMAC_IN_DATA  0xffffffff
 
 enum hmac_hash  
 { 
-#ifdef SHA_1
+#ifdef _SHA1_H
     HMAC_SHA1, 
 #endif
-#ifdef SHA_224 
+#ifdef _SHA2_H
+# ifdef SHA_224 
     HMAC_SHA224, 
-#endif
-#ifdef SHA_256
+# endif
+# ifdef SHA_256
     HMAC_SHA256, 
-#endif
-#ifdef SHA_384
+# endif
+# ifdef SHA_384
     HMAC_SHA384, 
-#endif
-#ifdef SHA_512
+# endif
+# ifdef SHA_512
     HMAC_SHA512, 
     HMAC_SHA512_256,
     HMAC_SHA512_224,
     HMAC_SHA512_192,
     HMAC_SHA512_128
+# endif
 #endif
 };
 
@@ -74,23 +82,25 @@ typedef struct
 {   hf_begin        *f_begin;
     hf_hash         *f_hash;
     hf_end          *f_end;
-    unsigned char   key[HMAC_MAX_BLOCK_SIZE];
+    unsigned char   key[HMAC_BLOCK_SIZE];
     union
     {
-#ifdef SHA_1
+#ifdef _SHA1_H
        sha1_ctx    u_sha1;
 #endif
-#ifdef SHA_224
+#ifdef _SHA2_H
+# ifdef SHA_224
         sha224_ctx  u_sha224;
-#endif
-#ifdef SHA_256
+# endif
+# ifdef SHA_256
         sha256_ctx  u_sha256;
-#endif
-#ifdef SHA_384
+# endif
+# ifdef SHA_384
         sha384_ctx  u_sha384;
-#endif
-#ifdef SHA_512
+# endif
+# ifdef SHA_512
         sha512_ctx  u_sha512;
+# endif
 #endif
     } sha_ctx[1];
     unsigned long   input_len;
