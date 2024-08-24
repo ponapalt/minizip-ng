@@ -36,9 +36,6 @@
 #  include "aes/fileenc.h"
 #  include "aes/prng.h"
 #endif
-#ifdef HAVE_APPLE_COMPRESSION
-#  include <compression.h>
-#endif
 
 #ifndef NOCRYPT
 #  include "crypt.h"
@@ -113,9 +110,6 @@ typedef struct
     z_stream stream;                /* zLib stream structure for inflate */
 #ifdef HAVE_BZIP2
     bz_stream bstream;              /* bzLib stream structure for bziped */
-#endif
-#ifdef HAVE_APPLE_COMPRESSION
-    compression_stream astream;     /* libcompression stream structure */
 #endif
 #ifdef HAVE_AES
     fcrypt_ctx aes_ctx;
@@ -1165,15 +1159,8 @@ extern int ZEXPORT zipOpenNewFileInZip_internal(zipFile file,
             if (windowBits > 0)
                 windowBits = -windowBits;
 
-#ifdef HAVE_APPLE_COMPRESSION
-            err = compression_stream_init(&zi->ci.astream, COMPRESSION_STREAM_ENCODE, COMPRESSION_ZLIB);
-            if (err == COMPRESSION_STATUS_ERROR)
-                err = Z_ERRNO;
-            else
-                err = Z_OK;
-#else
             err = deflateInit2(&zi->ci.stream, level, Z_DEFLATED, windowBits, memLevel, strategy);
-#endif
+
             if (err == Z_OK)
                 zi->ci.stream_initialised = Z_DEFLATED;
         }
@@ -1489,36 +1476,9 @@ extern int ZEXPORT zipWriteInFileInZip(zipFile file, const void *buf, uint32_t l
 
             if ((zi->ci.compression_method == Z_DEFLATED) && (!zi->ci.raw))
             {
-#ifdef HAVE_APPLE_COMPRESSION
-                uint32_t total_out_before = (uint32_t)zi->ci.stream.total_out;
-
-                zi->ci.astream.src_ptr = zi->ci.stream.next_in;
-                zi->ci.astream.src_size = zi->ci.stream.avail_in;
-                zi->ci.astream.dst_ptr = zi->ci.stream.next_out;
-                zi->ci.astream.dst_size = zi->ci.stream.avail_out;
-
-                compression_status status = 0;
-                compression_stream_flags flags = 0;
-
-                status = compression_stream_process(&zi->ci.astream, flags);
-
-                uint32_t total_out_after = len - zi->ci.astream.src_size;
-
-                zi->ci.stream.next_in = zi->ci.astream.src_ptr;
-                zi->ci.stream.avail_in = zi->ci.astream.src_size;
-                zi->ci.stream.next_out = zi->ci.astream.dst_ptr;
-                zi->ci.stream.avail_out = zi->ci.astream.dst_size;
-                zi->ci.stream.total_in += total_out_after;
-                //zi->ci.stream.total_out += copy_this;
-                zi->ci.pos_in_buffered_data += total_out_after;
-
-                if (status == COMPRESSION_STATUS_ERROR)
-                    err = ZIP_INTERNALERROR;
-#else
                 uint32_t total_out_before = (uint32_t)zi->ci.stream.total_out;
                 err = deflate(&zi->ci.stream, Z_NO_FLUSH);
                 zi->ci.pos_in_buffered_data += (uint32_t)(zi->ci.stream.total_out - total_out_before);
-#endif
             }
             else
             {
@@ -1582,40 +1542,9 @@ extern int ZEXPORT zipCloseFileInZipRaw64(zipFile file, uint64_t uncompressed_si
                 if (err != ZIP_OK)
                     break;
                 
-#ifdef HAVE_APPLE_COMPRESSION
-                total_out_before = zi->ci.stream.total_out;
-
-                zi->ci.astream.src_ptr = zi->ci.stream.next_in;
-                zi->ci.astream.src_size = zi->ci.stream.avail_in;
-                zi->ci.astream.dst_ptr = zi->ci.stream.next_out;
-                zi->ci.astream.dst_size = zi->ci.stream.avail_out;
-
-                compression_status status = 0;
-                status = compression_stream_process(&zi->ci.astream, COMPRESSION_STREAM_FINALIZE);
-
-                uint32_t total_out_after = Z_BUFSIZE - zi->ci.astream.dst_size;
-
-                zi->ci.stream.next_in = zi->ci.astream.src_ptr;
-                zi->ci.stream.avail_in = zi->ci.astream.src_size;
-                zi->ci.stream.next_out = zi->ci.astream.dst_ptr;
-                zi->ci.stream.avail_out = zi->ci.astream.dst_size;
-                //zi->ci.stream.total_in += total_out_after;
-                //zi->ci.stream.total_out += copy_this;
-                zi->ci.pos_in_buffered_data += total_out_after;
-
-                if (status == COMPRESSION_STATUS_ERROR)
-                {
-                    err = ZIP_INTERNALERROR;
-                }
-                else if (status == COMPRESSION_STATUS_END)
-                {
-                    err = Z_STREAM_END;
-                }
-#else
                 total_out_before = (uint32_t)zi->ci.stream.total_out;
                 err = deflate(&zi->ci.stream, Z_FINISH);
                 zi->ci.pos_in_buffered_data += (uint16_t)(zi->ci.stream.total_out - total_out_before);
-#endif
             }
         }
         else if (zi->ci.compression_method == Z_BZIP2ED)
@@ -1672,11 +1601,8 @@ extern int ZEXPORT zipCloseFileInZipRaw64(zipFile file, uint64_t uncompressed_si
         if (zi->ci.compression_method == Z_DEFLATED)
         {
             int tmp_err = 0;
-#ifdef HAVE_APPLE_COMPRESSION
-            tmp_err = compression_stream_destroy(&zi->ci.astream);
-#else
             tmp_err = deflateEnd(&zi->ci.stream);
-#endif
+
             if (err == ZIP_OK)
                 err = tmp_err;
             zi->ci.stream_initialised = 0;
