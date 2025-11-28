@@ -604,7 +604,10 @@ extern zipFile ZEXPORT zipOpen4(const void *path, int append, uint64_t disk_size
     {
         /* Don't support spanning ZIP with APPEND_STATUS_CREATEAFTER */
         if (disk_size > 0)
+        {
+            ZCLOSE64(ziinit.z_filefunc, ziinit.filestream);
             return NULL;
+        }
 
         ZSEEK64(ziinit.z_filefunc,ziinit.filestream,0,SEEK_END);
     }
@@ -766,9 +769,11 @@ extern zipFile ZEXPORT zipOpen4(const void *path, int append, uint64_t disk_size
         size_central_dir_to_read = size_central_dir;
         buf_size = SIZEDATA_INDATABLOCK;
         buf_read = (void*)ALLOC(buf_size);
+        if (buf_read == NULL)
+            err = ZIP_INTERNALERROR;
 
-        if (ZSEEK64(ziinit.z_filefunc, ziinit.filestream,
-                offset_central_dir + byte_before_the_zipfile, ZLIB_FILEFUNC_SEEK_SET) != 0)
+        if ((err == ZIP_OK) && (ZSEEK64(ziinit.z_filefunc, ziinit.filestream,
+                offset_central_dir + byte_before_the_zipfile, ZLIB_FILEFUNC_SEEK_SET) != 0))
             err = ZIP_ERRNO;
 
         while ((size_central_dir_to_read > 0) && (err == ZIP_OK))
@@ -794,18 +799,23 @@ extern zipFile ZEXPORT zipOpen4(const void *path, int append, uint64_t disk_size
             err = ZIP_ERRNO;
     }
 
-    if (globalcomment)
-        *globalcomment = ziinit.globalcomment;
 #endif
 
     if (err != ZIP_OK)
     {
 #ifndef NO_ADDFILEINEXISTINGZIP
+        free_linkedlist(&(ziinit.central_dir));
         TRYFREE(ziinit.globalcomment);
 #endif
+        ZCLOSE64(ziinit.z_filefunc, ziinit.filestream);
         TRYFREE(zi);
         return NULL;
     }
+
+#ifndef NO_ADDFILEINEXISTINGZIP
+    if (globalcomment)
+        *globalcomment = ziinit.globalcomment;
+#endif
 
     *zi = ziinit;
     zipGoToFirstDisk((zipFile)zi);
@@ -902,6 +912,9 @@ extern int ZEXPORT zipOpenNewFileInZip_internal(zipFile file,
     uint16_t i = 0;
     unsigned char *central_dir = NULL;
     int err = ZIP_OK;
+#ifdef HAVE_AES
+    int aes_crypt_initialised = 0;
+#endif
 
 #ifdef NOCRYPT
     if (password != NULL)
@@ -997,8 +1010,11 @@ extern int ZEXPORT zipOpenNewFileInZip_internal(zipFile file,
     zi->ci.zip64 = zip64;
 
     zi->ci.pos_local_header = ZTELL64(zi->z_filefunc, zi->filestream);
-    if (zi->ci.pos_local_header >= UINT32_MAX)
-        zi->ci.zip64 = 1;
+    {
+        uint64_t relative_offset = zi->ci.pos_local_header - zi->add_position_when_writting_offset;
+        if (relative_offset >= UINT32_MAX)
+            zi->ci.zip64 = 1;
+    }
 
     zi->ci.size_comment = size_comment;
     zi->ci.size_centralheader = SIZECENTRALHEADER + size_filename + size_extrafield_global;
@@ -1009,6 +1025,8 @@ extern int ZEXPORT zipOpenNewFileInZip_internal(zipFile file,
         zi->ci.size_centralextrafree += 11; /* Extra space reserved for AES extra info */
 #endif
     zi->ci.central_header = (char*)ALLOC((uint32_t)zi->ci.size_centralheader + zi->ci.size_centralextrafree + size_comment);
+    if (zi->ci.central_header == NULL)
+        return ZIP_INTERNALERROR;
     zi->ci.number_disk = zi->number_disk;
 
     /* Write central directory header */
@@ -1038,11 +1056,13 @@ extern int ZEXPORT zipOpenNewFileInZip_internal(zipFile file,
         zipWriteValueToMemoryAndMove(&central_dir, (uint32_t)0, 4);
     else
         zipWriteValueToMemoryAndMove(&central_dir, zipfi->external_fa, 4);
-    if (zi->ci.pos_local_header >= UINT32_MAX)
-        zipWriteValueToMemoryAndMove(&central_dir, UINT32_MAX, 4);
-    else
-        zipWriteValueToMemoryAndMove(&central_dir,
-            (uint32_t)(zi->ci.pos_local_header - zi->add_position_when_writting_offset), 4);
+    {
+        uint64_t relative_offset = zi->ci.pos_local_header - zi->add_position_when_writting_offset;
+        if (relative_offset >= UINT32_MAX)
+            zipWriteValueToMemoryAndMove(&central_dir, UINT32_MAX, 4);
+        else
+            zipWriteValueToMemoryAndMove(&central_dir, (uint32_t)relative_offset, 4);
+    }
 
     for (i = 0; i < size_filename; i++)
         zi->ci.central_header[SIZECENTRALHEADER+i] = filename[i];
@@ -1054,9 +1074,6 @@ extern int ZEXPORT zipOpenNewFileInZip_internal(zipFile file,
     for (i = 0; i < size_comment; i++)
         zi->ci.central_header[zi->ci.size_centralheader+
             zi->ci.size_centralextrafree+i] = comment[i];
-
-    if (zi->ci.central_header == NULL)
-        return ZIP_INTERNALERROR;
 
     /* Write the local header */
     if (err == ZIP_OK)
@@ -1200,11 +1217,14 @@ extern int ZEXPORT zipOpenNewFileInZip_internal(zipFile file,
             prng_rand(saltvalue, saltlength, zi->ci.aes_rng);
             prng_end(zi->ci.aes_rng);
 
-            fcrypt_init(AES_ENCRYPTIONMODE, (uint8_t *)password, (uint32_t)strlen(password), saltvalue, passverify, &zi->ci.aes_ctx);
+            if (fcrypt_init(AES_ENCRYPTIONMODE, (uint8_t *)password, (uint32_t)strlen(password), saltvalue, passverify, &zi->ci.aes_ctx) != 0)
+                err = ZIP_INTERNALERROR;
+            else
+                aes_crypt_initialised = 1;
 
-            if (ZWRITE64(zi->z_filefunc, zi->filestream, saltvalue, saltlength) != saltlength)
+            if ((err == ZIP_OK) && (ZWRITE64(zi->z_filefunc, zi->filestream, saltvalue, saltlength) != saltlength))
                 err = ZIP_ERRNO;
-            if (ZWRITE64(zi->z_filefunc, zi->filestream, passverify, AES_PWVERIFYSIZE) != AES_PWVERIFYSIZE)
+            if ((err == ZIP_OK) && (ZWRITE64(zi->z_filefunc, zi->filestream, passverify, AES_PWVERIFYSIZE) != AES_PWVERIFYSIZE))
                 err = ZIP_ERRNO;
 
             zi->ci.total_compressed += saltlength + AES_PWVERIFYSIZE + AES_AUTHCODESIZE;
@@ -1236,7 +1256,47 @@ extern int ZEXPORT zipOpenNewFileInZip_internal(zipFile file,
 #endif
 
     if (err == Z_OK)
+    {
         zi->in_opened_file_inzip = 1;
+    }
+    else
+    {
+        /* Failure: release everything allocated by this function so the
+           caller does not leak resources (zipCloseFileInZip cannot be
+           called because in_opened_file_inzip is still 0) */
+#ifndef NOCRYPT
+#ifdef HAVE_AES
+        if (aes_crypt_initialised)
+        {
+            unsigned char authcode_discard[AES_AUTHCODESIZE];
+            fcrypt_end(authcode_discard, &zi->ci.aes_ctx);
+        }
+#endif
+#endif
+        if (zi->ci.stream_initialised == Z_DEFLATED)
+            deflateEnd(&zi->ci.stream);
+#ifdef HAVE_BZIP2
+        else if (zi->ci.stream_initialised == Z_BZIP2ED)
+            BZ2_bzCompressEnd(&zi->ci.bstream);
+#endif
+#ifdef HAVE_LZMA
+        else if (zi->ci.stream_initialised == Z_LZMAED)
+        {
+            if (zi->ci.lzma_enc != NULL)
+            {
+                LzmaEnc_Destroy(zi->ci.lzma_enc, &g_Alloc, &g_Alloc);
+                zi->ci.lzma_enc = NULL;
+            }
+        }
+#endif
+        zi->ci.stream_initialised = 0;
+
+        if (zi->ci.central_header != NULL)
+        {
+            free(zi->ci.central_header);
+            zi->ci.central_header = NULL;
+        }
+    }
     return err;
 }
 
@@ -1624,6 +1684,24 @@ extern int ZEXPORT zipCloseFileInZipRaw64(zipFile file, uint64_t uncompressed_si
         uncompressed_size = zi->ci.total_uncompressed;
     }
 
+    /* Update zip64 flag based on actual sizes */
+    {
+        int was_zip64 = zi->ci.zip64;
+        if (uncompressed_size >= UINT32_MAX || zi->ci.total_compressed >= UINT32_MAX)
+            zi->ci.zip64 = 1;
+
+        /* Update local header version if zip64 became necessary due to file size */
+        if (zi->ci.zip64 && !was_zip64)
+        {
+            uint64_t cur_pos = ZTELL64(zi->z_filefunc, zi->filestream);
+            if (ZSEEK64(zi->z_filefunc, zi->filestream, zi->ci.pos_local_header + 4, ZLIB_FILEFUNC_SEEK_SET) == 0)
+            {
+                zipWriteValue(&zi->z_filefunc, zi->filestream, (uint16_t)45, 2); /* version needed to extract */
+                ZSEEK64(zi->z_filefunc, zi->filestream, cur_pos, ZLIB_FILEFUNC_SEEK_SET);
+            }
+        }
+    }
+
     /* Write data descriptor */
     if (err == ZIP_OK)
         err = zipWriteValue(&zi->z_filefunc, zi->filestream, (uint32_t)DATADESCRIPTORMAGIC, 4);
@@ -1664,14 +1742,22 @@ extern int ZEXPORT zipCloseFileInZipRaw64(zipFile file, uint64_t uncompressed_si
     if (zi->ci.total_compressed >= UINT32_MAX)
         extra_data_size += 8;
     /* Add ZIP64 extra info field for relative offset to local file header of current file */
-    if (zi->ci.pos_local_header >= UINT32_MAX)
-        extra_data_size += 8;
+    {
+        uint64_t relative_offset = zi->ci.pos_local_header - zi->add_position_when_writting_offset;
+        if (relative_offset >= UINT32_MAX)
+            extra_data_size += 8;
+    }
 
     /* Add ZIP64 extra info header to central directory */
     if (extra_data_size > 0)
     {
         if ((uint32_t)(extra_data_size + 4) > zi->ci.size_centralextrafree)
+        {
+            free(zi->ci.central_header);
+            zi->ci.central_header = NULL;
+            zi->in_opened_file_inzip = 0;
             return ZIP_BADZIPFILE;
+        }
 
         extra_info = (unsigned char*)zi->ci.central_header + zi->ci.size_centralheader;
 
@@ -1682,8 +1768,11 @@ extern int ZEXPORT zipCloseFileInZipRaw64(zipFile file, uint64_t uncompressed_si
             zipWriteValueToMemoryAndMove(&extra_info, uncompressed_size, 8);
         if (zi->ci.total_compressed >= UINT32_MAX)
             zipWriteValueToMemoryAndMove(&extra_info, zi->ci.total_compressed, 8);
-        if (zi->ci.pos_local_header >= UINT32_MAX)
-            zipWriteValueToMemoryAndMove(&extra_info, zi->ci.pos_local_header, 8);
+        {
+            uint64_t relative_offset = zi->ci.pos_local_header - zi->add_position_when_writting_offset;
+            if (relative_offset >= UINT32_MAX)
+                zipWriteValueToMemoryAndMove(&extra_info, relative_offset, 8);
+        }
 
         zi->ci.size_centralextrafree -= extra_data_size + 4;
         zi->ci.size_centralheader += extra_data_size + 4;
@@ -1700,7 +1789,12 @@ extern int ZEXPORT zipCloseFileInZipRaw64(zipFile file, uint64_t uncompressed_si
         extra_data_size = 7;
 
         if ((uint32_t)(extra_data_size + 4) > zi->ci.size_centralextrafree)
+        {
+            free(zi->ci.central_header);
+            zi->ci.central_header = NULL;
+            zi->in_opened_file_inzip = 0;
             return ZIP_BADZIPFILE;
+        }
 
         zipWriteValueToMemoryAndMove(&extra_info, 0x9901, 2);
         zipWriteValueToMemoryAndMove(&extra_info, extra_data_size, 2);
@@ -1727,6 +1821,7 @@ extern int ZEXPORT zipCloseFileInZipRaw64(zipFile file, uint64_t uncompressed_si
         err = add_data_in_datablock(&zi->central_dir, zi->ci.central_header, zi->ci.size_centralheader);
 
     free(zi->ci.central_header);
+    zi->ci.central_header = NULL;
 
     zi->number_entry++;
     zi->in_opened_file_inzip = 0;

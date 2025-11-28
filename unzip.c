@@ -108,6 +108,7 @@ typedef struct
 #endif
 #ifdef HAVE_AES
     fcrypt_ctx aes_ctx;
+    int      aes_initialised;           /* 1 if aes_ctx holds live OpenSSL contexts (fcrypt_init succeeded) */
 #endif
     uint64_t pos_in_zipfile;            /* position in byte on the zipfile, for fseek */
     uint8_t  stream_initialised;        /* flag set if stream structure is initialised */
@@ -433,7 +434,7 @@ static unzFile unzOpenInternal(const void *path, zlib_filefunc64_32_def *pzlib_f
                 if (unzReadUInt64(&us.z_filefunc, us.filestream, &us.offset_central_dir) != UNZ_OK)
                     err = UNZ_ERRNO;
             }
-            else if ((us.gi.number_entry == UINT16_MAX) || (us.size_central_dir == UINT16_MAX) || (us.offset_central_dir == UINT32_MAX))
+            else if ((us.gi.number_entry == UINT16_MAX) || (us.size_central_dir == UINT32_MAX) || (us.offset_central_dir == UINT32_MAX))
                 err = UNZ_BADZIPFILE;
         }
     }
@@ -467,11 +468,17 @@ static unzFile unzOpenInternal(const void *path, zlib_filefunc64_32_def *pzlib_f
     us.pfile_in_zip_read = NULL;
 
     s = (unz64_internal*)ALLOC(sizeof(unz64_internal));
-    if (s != NULL)
+    if (s == NULL)
     {
-        *s = us;
-        unzGoToFirstFile((unzFile)s);
+        /* Close both streams on allocation failure */
+        if ((us.filestream != NULL) && (us.filestream != us.filestream_with_CD))
+            ZCLOSE64(us.z_filefunc, us.filestream);
+        if (us.filestream_with_CD != NULL)
+            ZCLOSE64(us.z_filefunc, us.filestream_with_CD);
+        return NULL;
     }
+    *s = us;
+    unzGoToFirstFile((unzFile)s);
     return (unzFile)s;
 }
 
@@ -1112,6 +1119,9 @@ extern int ZEXPORT unzOpenCurrentFile3(unzFile file, int *method, int *level, in
     }
     
     pfile_in_zip_read_info->stream_initialised = 0;
+#ifdef HAVE_AES
+    pfile_in_zip_read_info->aes_initialised = 0;
+#endif
 
     pfile_in_zip_read_info->filestream = s->filestream;
     pfile_in_zip_read_info->z_filefunc = s->z_filefunc;
@@ -1272,8 +1282,12 @@ extern int ZEXPORT unzOpenCurrentFile3(unzFile file, int *method, int *level, in
             if (ZREAD64(s->z_filefunc, s->filestream, passverify_archive, AES_PWVERIFYSIZE) != AES_PWVERIFYSIZE)
                 return UNZ_INTERNALERROR;
 
-            fcrypt_init(s->cur_file_info_internal.aes_encryption_mode, (uint8_t *)password,
-                (uint32_t)strlen(password), salt_value, passverify_password, &s->pfile_in_zip_read->aes_ctx);
+            if (fcrypt_init(s->cur_file_info_internal.aes_encryption_mode, (uint8_t *)password,
+                (uint32_t)strlen(password), salt_value, passverify_password, &s->pfile_in_zip_read->aes_ctx) != 0)
+                return UNZ_INTERNALERROR;
+
+            /* aes_ctx now holds live contexts; unzCloseCurrentFile must release them */
+            s->pfile_in_zip_read->aes_initialised = 1;
 
             if (memcmp(passverify_archive, passverify_password, AES_PWVERIFYSIZE) != 0)
                 return UNZ_BADPASSWORD;
@@ -1888,17 +1902,26 @@ extern int ZEXPORT unzCloseCurrentFile(unzFile file)
         return UNZ_PARAMERROR;
 
 #ifdef HAVE_AES
-    if (s->cur_file_info.compression_method == AES_METHOD)
+    if ((s->cur_file_info.compression_method == AES_METHOD) &&
+        (pfile_in_zip_read_info->aes_initialised))
     {
         unsigned char authcode[AES_AUTHCODESIZE];
         unsigned char rauthcode[AES_AUTHCODESIZE];
+        int authcode_read_ok = 0;
 
-        if (ZREAD64(s->z_filefunc, s->filestream, authcode, AES_AUTHCODESIZE) != AES_AUTHCODESIZE)
-            return UNZ_ERRNO;
+        /* Do not return early here: fcrypt_end below must always run to
+           release the OpenSSL contexts held inside aes_ctx, and the
+           buffers/streams below must always be freed */
+        if (ZREAD64(s->z_filefunc, s->filestream, authcode, AES_AUTHCODESIZE) == AES_AUTHCODESIZE)
+            authcode_read_ok = 1;
+        else
+            err = UNZ_ERRNO;
 
-        if (fcrypt_end(rauthcode, &s->pfile_in_zip_read->aes_ctx) != AES_AUTHCODESIZE)
+        if (fcrypt_end(rauthcode, &pfile_in_zip_read_info->aes_ctx) != AES_AUTHCODESIZE)
             err = UNZ_CRCERROR;
-        if (memcmp(authcode, rauthcode, AES_AUTHCODESIZE) != 0)
+        pfile_in_zip_read_info->aes_initialised = 0;
+
+        if ((authcode_read_ok) && (memcmp(authcode, rauthcode, AES_AUTHCODESIZE) != 0))
             err = UNZ_CRCERROR;
     }
     /* AES zip version AE-1 will expect a valid crc as well */

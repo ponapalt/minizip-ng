@@ -244,21 +244,28 @@ int fcrypt_end(unsigned char mac[], fcrypt_ctx cx[1])
     int ret_len;
 
     ret_len = MAC_LENGTH(cx->mode);
+    memset(full_mac, 0, sizeof(full_mac));
+    mac_len = 0;
+    (void)mac_len;
 
-#if OPENSSL_VERSION_NUMBER >= 0x30000000L
+    /* Guard against a context that was never (fully) initialised */
+    if (cx->auth_ctx != NULL)
     {
-        size_t out_len = sizeof(full_mac);
-        EVP_MAC_final(cx->auth_ctx, full_mac, &out_len, out_len);
-        mac_len = (unsigned int)out_len;
-    }
+#if OPENSSL_VERSION_NUMBER >= 0x30000000L
+        {
+            size_t out_len = sizeof(full_mac);
+            EVP_MAC_final(cx->auth_ctx, full_mac, &out_len, out_len);
+            mac_len = (unsigned int)out_len;
+        }
 #else
-    HMAC_Final(cx->auth_ctx, full_mac, &mac_len);
+        HMAC_Final(cx->auth_ctx, full_mac, &mac_len);
 #endif
+    }
 
     /* Copy only the required MAC length */
     memcpy(mac, full_mac, ret_len);
 
-    /* Cleanup */
+    /* Cleanup (the OpenSSL free functions are NULL-safe) */
 #if OPENSSL_VERSION_NUMBER >= 0x30000000L
     EVP_MAC_CTX_free(cx->auth_ctx);
 #else
