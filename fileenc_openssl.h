@@ -1,46 +1,20 @@
 /*
  ---------------------------------------------------------------------------
- Copyright (c) 2002, Dr Brian Gladman <                 >, Worcester, UK.
- All rights reserved.
+ OpenSSL-based file encryption for minizip
 
- LICENSE TERMS
+ This file implements password based file encryption and authentication
+ using AES in CTR mode, HMAC-SHA1 authentication and RFC2898 password
+ based key derivation via OpenSSL APIs.
 
- The free distribution and use of this software in both source and binary
- form is allowed (with or without changes) provided that:
-
-   1. distributions of this source code include the above copyright
-      notice, this list of conditions and the following disclaimer;
-
-   2. distributions in binary form include the above copyright
-      notice, this list of conditions and the following disclaimer
-      in the documentation and/or other associated materials;
-
-   3. the copyright holder's name is not used to endorse products
-      built using this software without specific written permission.
-
- ALTERNATIVELY, provided that this notice is retained in full, this product
- may be distributed under the terms of the GNU General Public License (GPL),
- in which case the provisions of the GPL apply INSTEAD OF those given above.
-
- DISCLAIMER
-
- This software is provided 'as is' with no explicit or implied warranties
- in respect of its properties, including, but not limited to, correctness
- and/or fitness for purpose.
+ This replaces the original aes/ directory implementation.
  ---------------------------------------------------------------------------
- Issue Date: 24/01/2003
-
- This file contains the header file for fileenc.c, which implements password
- based file encryption and authentication using AES in CTR mode, HMAC-SHA1 
- authentication and RFC2898 password based key derivation.
 */
 
-#ifndef _FENC_H
-#define _FENC_H
+#ifndef _FENC_OPENSSL_H
+#define _FENC_OPENSSL_H
 
-#include "aes.h"
-#include "hmac.h"
-#include "pwd2key.h"
+#include <openssl/evp.h>
+#include <openssl/hmac.h>
 
 #define PASSWORD_VERIFIER
 
@@ -82,13 +56,18 @@ extern "C"
 #endif
 
 typedef struct
-{   unsigned char   nonce[AES_BLOCK_SIZE];      /* the CTR nonce          */
-    unsigned char   encr_bfr[AES_BLOCK_SIZE];   /* encrypt buffer         */
-    aes_encrypt_ctx encr_ctx[1];                /* encryption context     */
-    hmac_ctx        auth_ctx[1];                /* authentication context */
-    unsigned int    encr_pos;                   /* block position (enc)   */
-    unsigned int    pwd_len;                    /* password length        */
-    unsigned int    mode;                       /* File encryption mode   */
+{
+    unsigned char   nonce[16];              /* the CTR nonce          */
+    unsigned char   encr_bfr[16];           /* encrypt buffer         */
+    EVP_CIPHER_CTX  *encr_ctx;              /* encryption context     */
+#if OPENSSL_VERSION_NUMBER >= 0x30000000L
+    EVP_MAC_CTX     *auth_ctx;              /* authentication context (OpenSSL 3.0+) */
+#else
+    HMAC_CTX        *auth_ctx;              /* authentication context (OpenSSL 1.x) */
+#endif
+    unsigned int    encr_pos;               /* block position (enc)   */
+    unsigned int    pwd_len;                /* password length        */
+    unsigned int    mode;                   /* File encryption mode   */
 } fcrypt_ctx;
 
 /* initialise file encryption or decryption */
@@ -113,6 +92,17 @@ void fcrypt_decrypt(unsigned char data[], unsigned int data_len, fcrypt_ctx cx[1
 
 int fcrypt_end(unsigned char mac[],     /* the MAC value (output)   */
                fcrypt_ctx cx[1]);       /* the context (input)      */
+
+/* Random number generation for salt values */
+
+typedef struct
+{
+    int initialized; /* dummy field for compatibility */
+} prng_ctx;
+
+void prng_init(void* fun, prng_ctx ctx[1]);
+void prng_rand(unsigned char data[], unsigned int data_len, prng_ctx ctx[1]);
+void prng_end(prng_ctx ctx[1]);
 
 #if defined(__cplusplus)
 }

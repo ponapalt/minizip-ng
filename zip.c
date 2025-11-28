@@ -33,8 +33,7 @@
 #  define AES_VERSION         (0x0001)
 #  define AES_ENCRYPTIONMODE  (0x03)
 
-#  include "aes/fileenc.h"
-#  include "aes/prng.h"
+#  include "fileenc_openssl.h"
 #endif
 
 #ifndef NOCRYPT

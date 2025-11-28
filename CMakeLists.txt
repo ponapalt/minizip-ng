@@ -57,50 +57,28 @@ if(CMAKE_C_COMPILER MATCHES ".*clang")
     set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -msse3 -msse4.1 -maes")
 endif()
 
+# Configure AES support using OpenSSL
+option(USE_AES "enables AES encryption using OpenSSL" ON)
+if(USE_AES)
+  # Find OpenSSL package
+  find_package(OpenSSL REQUIRED)
+  if(OPENSSL_FOUND)
+    include_directories(${OPENSSL_INCLUDE_DIR})
+  endif()
+
+  # Add OpenSSL-based AES implementation
+  list(APPEND MINIZIP_SRC "fileenc_openssl.c")
+  list(APPEND MINIZIP_PUBLIC_HEADERS "fileenc_openssl.h")
+
+  add_definitions(-DHAVE_AES)
+endif()
+
 # create minizip library
 add_library(minizip ${MINIZIP_SRC} ${MINIZIP_PUBLIC_HEADERS})
 target_link_libraries(minizip ZLIB::ZLIB)
 
-option(USE_AES "enables building of aes library" ON)
 if(USE_AES)
-  set(AES_SRC 
-    aes/aescrypt.c
-    aes/aeskey.c
-    aes/aestab.c
-    aes/aes_ni.c
-    aes/fileenc.c
-    aes/hmac.c
-    aes/prng.c
-    aes/pwd2key.c
-    aes/sha1.c)
-
-  set(AES_PUBLIC_HEADERS 
-    aes/aes.h
-    aes/aes_ni.h
-    aes/aesopt.h
-    aes/aestab.h
-    aes/brg_endian.h
-    aes/brg_types.h
-    aes/fileenc.h
-    aes/hmac.h
-    aes/prng.h
-    aes/pwd2key.h
-    aes/sha1.h)
-
-  add_library(aes ${AES_SRC} ${AES_PUBLIC_HEADERS})
-
-  add_definitions(-DHAVE_AES)
-
-  target_link_libraries(minizip aes)
-
-  install(TARGETS aes EXPORT minizip-exports
-    INCLUDES DESTINATION "include"
-    RUNTIME DESTINATION  "bin"
-    LIBRARY DESTINATION  "lib"
-    ARCHIVE DESTINATION  "lib")
-
-  install(FILES ${AES_PUBLIC_HEADERS}
-    DESTINATION "include/minizip/aes")
+  target_link_libraries(minizip ${OPENSSL_LIBRARIES})
 endif()
 
 install(TARGETS minizip EXPORT minizip-exports
@@ -124,7 +102,18 @@ write_basic_package_version_file(
 
 # Create config for find_package()
 
-file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/minizip-config.cmake.in"
+if(USE_AES)
+  file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/minizip-config.cmake.in"
+"
+@PACKAGE_INIT@
+include(CMakeFindDependencyMacro)
+find_dependency(ZLIB)
+find_dependency(OpenSSL)
+include(\"\${CMAKE_CURRENT_LIST_DIR}/minizip-exports.cmake\")
+check_required_components(minizip)
+")
+else()
+  file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/minizip-config.cmake.in"
 "
 @PACKAGE_INIT@
 include(CMakeFindDependencyMacro)
@@ -132,6 +121,7 @@ find_dependency(ZLIB)
 include(\"\${CMAKE_CURRENT_LIST_DIR}/minizip-exports.cmake\")
 check_required_components(minizip)
 ")
+endif()
 
 configure_package_config_file(
   "${CMAKE_CURRENT_BINARY_DIR}/minizip-config.cmake.in"

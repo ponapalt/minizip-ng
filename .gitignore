@@ -3,3 +3,6 @@ xcuserdata/
 
 # JetBrains
 .idea/
+
+# Build directories
+build/

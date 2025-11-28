@@ -35,7 +35,7 @@
 #  define AES_HEADERSIZE      (11)
 #  define AES_KEYSIZE(mode)   (64 + (mode * 64))
 
-#  include "aes/fileenc.h"
+#  include "fileenc_openssl.h"
 #endif
 
 #ifndef NOUNCRYPT
@@ -1591,7 +1591,7 @@ extern int ZEXPORT unzReadCurrentFile(unzFile file, voidp buf, uint32_t len)
             total_out_after = s->pfile_in_zip_read->stream.total_out;
             /* Detect overflow, because z_stream.total_out is uLong (32 bits) */
             if (total_out_after<total_out_before)
-                total_out_after += 1ui64 << 32; /* Add maximum value of uLong + 1 */
+                total_out_after += ((uint64_t)1 << 32); /* Add maximum value of uLong + 1 */
             out_bytes = total_out_after - total_out_before;
 
             s->pfile_in_zip_read->total_out_64 += out_bytes;
