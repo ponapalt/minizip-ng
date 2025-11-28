@@ -116,6 +116,10 @@ int miniunz_list(unzFile uf)
 		{
             string_method = "LZMA ";
 		}
+		else if ( file_info.compression_method == Z_DEFLATE64ED)
+		{
+            string_method = "Dfl64 ";
+		}
         else
             string_method = "Unkn. ";
 

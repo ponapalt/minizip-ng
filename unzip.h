@@ -22,6 +22,7 @@
 #define HAVE_LZMA
 #define HAVE_BZIP2
 #define HAVE_AES
+#define HAVE_DEFLATE64
 
 #ifdef __cplusplus
 extern "C" {
@@ -43,8 +44,9 @@ extern "C" {
 #include "lzma/LzmaDec.h"
 #endif
 
-#define Z_BZIP2ED 12
-#define Z_LZMAED  14
+#define Z_BZIP2ED    12
+#define Z_LZMAED     14
+#define Z_DEFLATE64ED 9
 
 #if defined(STRICTUNZIP) || defined(STRICTZIPUNZIP)
 /* like the STRICT of WIN32, we define a pointer that cannot be converted
@@ -191,13 +193,16 @@ extern int ZEXPORT unzOpenCurrentFile2(unzFile file, int *method, int *level, in
 extern int ZEXPORT unzOpenCurrentFile3(unzFile file, int *method, int *level, int raw, const char *password);
 /* Same as unzOpenCurrentFile, but takes extra parameter password for encrypted files */
 
-extern int ZEXPORT unzReadCurrentFile(unzFile file, voidp buf, uint32_t len);
-/* Read bytes from the current file (opened by unzOpenCurrentFile)
-   buf contain buffer where data must be copied
-   len the size of buf.
+/* Callback function type for writing decompressed data */
+typedef int (*unzWriteCallback)(void *opaque, const void *buf, uint32_t len);
 
-   return the number of byte copied if somes bytes are copied
-   return 0 if the end of file was reached
+extern int ZEXPORT unzReadCurrentFile(unzFile file, unzWriteCallback write_cb, void *opaque);
+/* Read and decompress the current file (opened by unzOpenCurrentFile) using a callback.
+   write_cb is called with decompressed data chunks
+   opaque is passed to the callback
+
+   return UNZ_OK if successful
+   return UNZ_EOF if the end of file was reached
    return <0 with error code if there is an error (UNZ_ERRNO for IO error, or zLib error for uncompress error) */
 
 extern int ZEXPORT unzGetCurrentFileInfo(unzFile file, unz_file_info *pfile_info, char *filename, 

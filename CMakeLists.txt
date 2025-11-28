@@ -73,6 +73,22 @@ if(USE_AES)
   add_definitions(-DHAVE_AES)
 endif()
 
+# Configure Deflate64 support
+option(USE_DEFLATE64 "enables Deflate64 decompression support" ON)
+if(USE_DEFLATE64)
+  # Add Deflate64 implementation files
+  list(APPEND MINIZIP_SRC
+    "deflate64/infback9.c"
+    "deflate64/inftree9.c")
+  list(APPEND MINIZIP_PUBLIC_HEADERS
+    "deflate64/infback9.h"
+    "deflate64/inflate9.h"
+    "deflate64/inftree9.h"
+    "deflate64/inffix9.h")
+
+  add_definitions(-DHAVE_DEFLATE64)
+endif()
+
 # create minizip library
 add_library(minizip ${MINIZIP_SRC} ${MINIZIP_PUBLIC_HEADERS})
 target_link_libraries(minizip ZLIB::ZLIB)

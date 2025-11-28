@@ -37,8 +37,9 @@ extern "C" {
 #  include "bzlib/bzlib.h"
 #endif
 
-#define Z_BZIP2ED 12
-#define Z_LZMAED 14
+#define Z_BZIP2ED    12
+#define Z_LZMAED     14
+#define Z_DEFLATE64ED 9
 
 #if defined(STRICTZIP) || defined(STRICTZIPUNZIP)
 /* like the STRICT of WIN32, we define a pointer that cannot be converted
