@@ -1736,21 +1736,52 @@ extern int ZEXPORT unzReadCurrentFile(unzFile file, unzWriteCallback write_cb, v
 
             if (!pfile->lzma_init)
             {
+                unsigned short propsize;
+
                 if (pfile->stream.avail_in < LZMA_MAGIC_SIZE)
                 {
                     TRYFREE(temp_buf);
                     return UNZ_ERRNO;
                 }
 
-                /* Skip magic and parse header - simplified */
+                /* Read property size from LZMA magic header (bytes 2-3, little-endian) */
+                propsize = pfile->stream.next_in[2] | (pfile->stream.next_in[3] << 8);
+
                 pfile->stream.next_in += LZMA_MAGIC_SIZE;
                 pfile->stream.avail_in -= LZMA_MAGIC_SIZE;
+
+                /* Parse LZMA properties and allocate decoder */
+                if (pfile->stream.avail_in < propsize)
+                {
+                    TRYFREE(temp_buf);
+                    return UNZ_ERRNO;
+                }
+                if (LzmaDec_Allocate(&pfile->lzma_stream,
+                                     pfile->stream.next_in,
+                                     propsize,
+                                     &pfile->lzma_alloc) != SZ_OK)
+                {
+                    LzmaDec_Free(&pfile->lzma_stream, &pfile->lzma_alloc);
+                    TRYFREE(temp_buf);
+                    return UNZ_ERRNO;
+                }
+                pfile->stream.next_in += propsize;
+                pfile->stream.avail_in -= propsize;
+
+                LzmaDec_Init(&pfile->lzma_stream);
+
                 pfile->lzma_init = 1;
             }
 
             in_bytes = pfile->stream.avail_in;
             out_bytes = pfile->stream.avail_out;
             buf_before = pfile->stream.next_out;
+
+            if (pfile->rest_read_uncompressed <= out_bytes)
+            {
+                fmode = LZMA_FINISH_END;
+                out_bytes = (uint32_t)pfile->rest_read_uncompressed;
+            }
 
             lzma_err = LzmaDec_DecodeToBuf(&pfile->lzma_stream, pfile->stream.next_out,
                                            &out_bytes, pfile->stream.next_in, &in_bytes,

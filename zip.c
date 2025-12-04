@@ -36,6 +36,12 @@
 #  include "fileenc_openssl.h"
 #endif
 
+#ifdef HAVE_LZMA
+#  include "lzma/LzmaEnc.h"
+#  include "lzma/Alloc.h"
+#  include "lzma/7zVersion.h"
+#endif
+
 #ifndef NOCRYPT
 #  include "crypt.h"
 #endif
@@ -110,6 +116,13 @@ typedef struct
 #ifdef HAVE_BZIP2
     bz_stream bstream;              /* bzLib stream structure for bziped */
 #endif
+#ifdef HAVE_LZMA
+    CLzmaEncHandle lzma_enc;        /* LZMA encoder handle */
+    int lzma_level;                 /* LZMA compression level (0-9) */
+    Byte *lzma_input_buffer;        /* Input buffer for LZMA encoding */
+    SizeT lzma_input_size;          /* Size of data in input buffer */
+    SizeT lzma_input_capacity;      /* Capacity of input buffer */
+#endif
 #ifdef HAVE_AES
     fcrypt_ctx aes_ctx;
     prng_ctx aes_rng[1];
@@ -126,6 +139,7 @@ typedef struct
     uint16_t flag;                  /* flag of the file currently writing */
 
     uint16_t method;                /* compression method written to file.*/
+    uint16_t version_needed;        /* version needed to extract for this file */
     uint16_t compression_method;    /* compression method to use */
     int      raw;                   /* 1 for directly writing raw data */
     uint8_t  buffered_data[Z_BUFSIZE];  /* buffer contain compressed data to be writ*/
@@ -160,6 +174,78 @@ typedef struct
     char *globalcomment;
 #endif
 } zip64_internal;
+
+#ifdef HAVE_LZMA
+/* LZMA output stream for streaming compressed data to zip file */
+typedef struct
+{
+    ISeqOutStream vt;               /* Virtual table - must be first */
+    zip64_internal *zi;             /* Pointer to zip internal state */
+    int err;                        /* Error code from write operations */
+} CLzmaOutStream;
+
+/* LZMA input stream for reading from input buffer */
+typedef struct
+{
+    ISeqInStream vt;                /* Virtual table - must be first */
+    const Byte *data;               /* Pointer to input data */
+    SizeT size;                     /* Remaining size to read */
+} CLzmaInStream;
+
+/* Forward declaration */
+static int zipFlushWriteBuffer(zip64_internal *zi);
+
+/* LZMA output stream write callback */
+static size_t LzmaOutStream_Write(const ISeqOutStream *pp, const void *buf, size_t size)
+{
+    CLzmaOutStream *p = Z7_CONTAINER_FROM_VTBL(pp, CLzmaOutStream, vt);
+    zip64_internal *zi = p->zi;
+    const Byte *src = (const Byte *)buf;
+    size_t remaining = size;
+    size_t written_total = 0;
+    size_t space_in_buffer;
+    size_t to_copy;
+
+    while (remaining > 0 && p->err == ZIP_OK)
+    {
+        space_in_buffer = Z_BUFSIZE - zi->ci.pos_in_buffered_data;
+        to_copy = (remaining < space_in_buffer) ? remaining : space_in_buffer;
+
+        memcpy(zi->ci.buffered_data + zi->ci.pos_in_buffered_data, src, to_copy);
+        zi->ci.pos_in_buffered_data += (uint32_t)to_copy;
+        src += to_copy;
+        remaining -= to_copy;
+        written_total += to_copy;
+
+        if (zi->ci.pos_in_buffered_data >= Z_BUFSIZE)
+        {
+            p->err = zipFlushWriteBuffer(zi);
+        }
+    }
+
+    return (p->err == ZIP_OK) ? written_total : 0;
+}
+
+/* LZMA input stream read callback */
+static SRes LzmaInStream_Read(const ISeqInStream *pp, void *buf, size_t *size)
+{
+    CLzmaInStream *p = Z7_CONTAINER_FROM_VTBL(pp, CLzmaInStream, vt);
+    size_t to_read = *size;
+
+    if (to_read > p->size)
+        to_read = p->size;
+
+    if (to_read > 0)
+    {
+        memcpy(buf, p->data, to_read);
+        p->data += to_read;
+        p->size -= to_read;
+    }
+
+    *size = to_read;
+    return SZ_OK;
+}
+#endif
 
 /* Allocate a new data block */
 static linkedlist_datablock_internal *allocate_new_datablock(void)
@@ -928,17 +1014,20 @@ extern int ZEXPORT zipOpenNewFileInZip_internal(zipFile file,
 #ifdef HAVE_BZIP2
         (method != Z_BZIP2ED) &&
 #endif
+#ifdef HAVE_LZMA
+        (method != Z_LZMAED) &&
+#endif
         (method != Z_DEFLATED))
         return ZIP_PARAMERROR;
-        
-    // The filename and comment length must fit in 16 bits.
+
+    /* The filename and comment length must fit in 16 bits. */
     if ((filename!=NULL) && (strlen(filename)>UINT16_MAX))
         return ZIP_PARAMERROR;
     if ((comment!=NULL) && (strlen(comment)>UINT16_MAX))
         return ZIP_PARAMERROR;
-    // The extra field length must fit in 16 bits. If the member also requires
-    // a Zip64 extra block, that will also need to fit within that 16-bit
-    // length, but that will be checked for later.
+    /* The extra field length must fit in 16 bits. If the member also requires
+       a Zip64 extra block, that will also need to fit within that 16-bit
+       length, but that will be checked for later. */
     if ((size_extrafield_local>UINT16_MAX) || (size_extrafield_global>UINT16_MAX))
         return ZIP_PARAMERROR;
 
@@ -971,12 +1060,24 @@ extern int ZEXPORT zipOpenNewFileInZip_internal(zipFile file,
     zi->ci.compression_method = method;
     zi->ci.raw = raw;
     zi->ci.flag = flag_base | 8;
-    if ((level == 8) || (level == 9))
+    if (method == Z_DEFLATED)
+    {
+        /* Bits 1-2 hold the deflate compression option (appnote 4.4.4) */
+        if ((level == 8) || (level == 9))
+            zi->ci.flag |= 2;
+        if (level == 2)
+            zi->ci.flag |= 4;
+        if (level == 1)
+            zi->ci.flag |= 6;
+    }
+#ifdef HAVE_LZMA
+    else if ((method == Z_LZMAED) && (!raw))
+    {
+        /* Bit 1 signals that an end-of-stream marker terminates the compressed
+           data (appnote 5.8.9). The encoder always sets props.writeEndMark. */
         zi->ci.flag |= 2;
-    if (level == 2)
-        zi->ci.flag |= 4;
-    if (level == 1)
-        zi->ci.flag |= 6;
+    }
+#endif
 
     if (password != NULL)
     {
@@ -1016,6 +1117,14 @@ extern int ZEXPORT zipOpenNewFileInZip_internal(zipFile file,
             zi->ci.zip64 = 1;
     }
 
+    /* Version needed to extract: 2.0 by default, 4.5 for ZIP64 and 6.3 for
+       LZMA (appnote 5.8.3). Keep the highest requirement of the lot. */
+    zi->ci.version_needed = (uint16_t)(zi->ci.zip64 ? 45 : 20);
+#ifdef HAVE_LZMA
+    if ((method == Z_LZMAED) && (zi->ci.version_needed < 63))
+        zi->ci.version_needed = 63;
+#endif
+
     zi->ci.size_comment = size_comment;
     zi->ci.size_centralheader = SIZECENTRALHEADER + size_filename + size_extrafield_global;
     zi->ci.size_centralextra = size_extrafield_global;
@@ -1033,10 +1142,7 @@ extern int ZEXPORT zipOpenNewFileInZip_internal(zipFile file,
     central_dir = (unsigned char*)zi->ci.central_header;
     zipWriteValueToMemoryAndMove(&central_dir, (uint32_t)CENTRALHEADERMAGIC, 4);
     zipWriteValueToMemoryAndMove(&central_dir, version_madeby, 2);
-    if (zi->ci.zip64)
-        zipWriteValueToMemoryAndMove(&central_dir, (uint16_t)45, 2);
-    else
-        zipWriteValueToMemoryAndMove(&central_dir, (uint16_t)20, 2);
+    zipWriteValueToMemoryAndMove(&central_dir, zi->ci.version_needed, 2);
     zipWriteValueToMemoryAndMove(&central_dir, zi->ci.flag, 2);
     zipWriteValueToMemoryAndMove(&central_dir, zi->ci.method, 2);
     zipWriteValueToMemoryAndMove(&central_dir, zi->ci.dos_date, 4);
@@ -1080,12 +1186,7 @@ extern int ZEXPORT zipOpenNewFileInZip_internal(zipFile file,
         err = zipWriteValue(&zi->z_filefunc, zi->filestream, (uint32_t)LOCALHEADERMAGIC, 4);
 
     if (err == ZIP_OK)
-    {
-        if (zi->ci.zip64)
-            err = zipWriteValue(&zi->z_filefunc, zi->filestream, (uint16_t)45, 2); /* version needed to extract */
-        else
-            err = zipWriteValue(&zi->z_filefunc, zi->filestream, (uint16_t)20, 2); /* version needed to extract */
-    }
+        err = zipWriteValue(&zi->z_filefunc, zi->filestream, zi->ci.version_needed, 2); /* version needed to extract */
     if (err == ZIP_OK)
         err = zipWriteValue(&zi->z_filefunc, zi->filestream, zi->ci.flag, 2);
     if (err == ZIP_OK)
@@ -1161,6 +1262,14 @@ extern int ZEXPORT zipOpenNewFileInZip_internal(zipFile file,
     zi->ci.bstream.total_out_lo32 = 0;
 #endif
 
+#ifdef HAVE_LZMA
+    zi->ci.lzma_enc = NULL;
+    zi->ci.lzma_level = 5;
+    zi->ci.lzma_input_buffer = NULL;
+    zi->ci.lzma_input_size = 0;
+    zi->ci.lzma_input_capacity = 0;
+#endif
+
     zi->ci.stream.avail_in = (uint16_t)0;
     zi->ci.stream.avail_out = Z_BUFSIZE;
     zi->ci.stream.next_out = zi->ci.buffered_data;
@@ -1194,6 +1303,26 @@ extern int ZEXPORT zipOpenNewFileInZip_internal(zipFile file,
             err = BZ2_bzCompressInit(&zi->ci.bstream, level, 0, 35);
             if (err == BZ_OK)
                 zi->ci.stream_initialised = Z_BZIP2ED;
+#endif
+        }
+        else if (method == Z_LZMAED)
+        {
+#ifdef HAVE_LZMA
+            /* The LZMA properties header is emitted by zipCloseFileInZipRaw64:
+               the encoder properties depend on the uncompressed size, which is
+               only known once the caller is done feeding data. */
+            zi->ci.lzma_enc = LzmaEnc_Create(&g_Alloc);
+            if (zi->ci.lzma_enc == NULL)
+            {
+                err = ZIP_INTERNALERROR;
+            }
+            else
+            {
+                zi->ci.lzma_level = (level < 0) ? 5 : level;
+                if (zi->ci.lzma_level > 9)
+                    zi->ci.lzma_level = 9;
+                zi->ci.stream_initialised = Z_LZMAED;
+            }
 #endif
         }
     }
@@ -1303,11 +1432,11 @@ extern int ZEXPORT zipOpenNewFileInZip_internal(zipFile file,
 extern int ZEXPORT zipOpenNewFileInZip5(zipFile file, const char *filename, const zip_fileinfo *zipfi,
     const void *extrafield_local, uint16_t size_extrafield_local, const void *extrafield_global,
     uint16_t size_extrafield_global, const char *comment, uint16_t flag_base, int zip64, uint16_t method, int level, int raw,
-    int windowBits, int memLevel, int strategy, const char *password, int aes)
+    int windowBits, int memLevel, int strategy, const char *password, int aes, uint16_t version_madeby)
 {
     return zipOpenNewFileInZip_internal(file, filename, zipfi, extrafield_local, size_extrafield_local, extrafield_global,
         size_extrafield_global, comment, flag_base, zip64, method, level, raw, windowBits, memLevel, strategy, password, aes,
-        VERSIONMADEBY);
+        version_madeby);
 }
 
 extern int ZEXPORT zipOpenNewFileInZip4_64(zipFile file, const char *filename, const zip_fileinfo *zipfi,
@@ -1455,18 +1584,24 @@ static int zipFlushWriteBuffer(zip64_internal *zi)
 
     zi->ci.total_compressed += zi->ci.pos_in_buffered_data;
 
-#ifdef HAVE_BZIP2
-    if (zi->ci.compression_method == Z_BZIP2ED)
-    {
-        zi->ci.total_uncompressed += zi->ci.bstream.total_in_lo32;
-        zi->ci.bstream.total_in_lo32 = 0;
-        zi->ci.bstream.total_in_hi32 = 0;
-    }
-    else
+#ifdef HAVE_LZMA
+    /* LZMA updates total_uncompressed in zipCloseFileInZipRaw64 */
+    if (zi->ci.compression_method != Z_LZMAED)
 #endif
     {
-        zi->ci.total_uncompressed += zi->ci.stream.total_in;
-        zi->ci.stream.total_in = 0;
+#ifdef HAVE_BZIP2
+        if (zi->ci.compression_method == Z_BZIP2ED)
+        {
+            zi->ci.total_uncompressed += zi->ci.bstream.total_in_lo32;
+            zi->ci.bstream.total_in_lo32 = 0;
+            zi->ci.bstream.total_in_hi32 = 0;
+        }
+        else
+#endif
+        {
+            zi->ci.total_uncompressed += zi->ci.stream.total_in;
+            zi->ci.stream.total_in = 0;
+        }
     }
 
     zi->ci.pos_in_buffered_data = 0;
@@ -1488,6 +1623,53 @@ extern int ZEXPORT zipWriteInFileInZip(zipFile file, const void *buf, uint32_t l
 
     zi->ci.crc32 = (uint32_t)crc32(zi->ci.crc32, buf, len);
 
+#ifdef HAVE_LZMA
+    if ((zi->ci.compression_method == Z_LZMAED) && (!zi->ci.raw))
+    {
+        /* For LZMA the whole member is buffered here and compressed at close
+           time: LzmaEnc_Encode pulls its input from an ISeqInStream while this
+           function is push driven, so without a helper thread there is no way
+           to stream. Note this means the member size is bound by the address
+           space of the build (SizeT is 32 bit on 32 bit targets). */
+        SizeT new_size;
+
+        if ((SizeT)len > (SizeT)(~(SizeT)0) - zi->ci.lzma_input_size)
+            return ZIP_INTERNALERROR;   /* input too large for this build */
+
+        new_size = zi->ci.lzma_input_size + (SizeT)len;
+
+        if (new_size > zi->ci.lzma_input_capacity)
+        {
+            SizeT new_capacity = zi->ci.lzma_input_capacity;
+            Byte *new_buffer;
+
+            if (new_capacity < 65536)
+                new_capacity = 65536;
+            while (new_capacity < new_size)
+            {
+                if (new_capacity > (SizeT)(~(SizeT)0) / 2)
+                {
+                    new_capacity = new_size;    /* no headroom left, take exact */
+                    break;
+                }
+                new_capacity *= 2;
+            }
+
+            new_buffer = (Byte *)realloc(zi->ci.lzma_input_buffer, new_capacity);
+            if (new_buffer == NULL)
+                return ZIP_INTERNALERROR;
+
+            zi->ci.lzma_input_buffer = new_buffer;
+            zi->ci.lzma_input_capacity = new_capacity;
+        }
+
+        memcpy(zi->ci.lzma_input_buffer + zi->ci.lzma_input_size, buf, len);
+        zi->ci.lzma_input_size += len;
+
+        return ZIP_OK;
+    }
+    else
+#endif
 #ifdef HAVE_BZIP2
     if ((zi->ci.compression_method == Z_BZIP2ED) && (!zi->ci.raw))
     {
@@ -1500,7 +1682,7 @@ extern int ZEXPORT zipWriteInFileInZip(zipFile file, const void *buf, uint32_t l
             if (zi->ci.bstream.avail_out == 0)
             {
                 err = zipFlushWriteBuffer(zi);
-                
+
                 zi->ci.bstream.avail_out = (uint16_t)Z_BUFSIZE;
                 zi->ci.bstream.next_out = (char*)zi->ci.buffered_data;
             }
@@ -1617,15 +1799,15 @@ extern int ZEXPORT zipCloseFileInZipRaw64(zipFile file, uint64_t uncompressed_si
             while (err == BZ_FINISH_OK)
             {
                 uint32_t total_out_before = 0;
-                
+
                 if (zi->ci.bstream.avail_out == 0)
                 {
                     err = zipFlushWriteBuffer(zi);
-                    
+
                     zi->ci.bstream.avail_out = (uint16_t)Z_BUFSIZE;
                     zi->ci.bstream.next_out = (char*)zi->ci.buffered_data;
                 }
-                
+
                 total_out_before = zi->ci.bstream.total_out_lo32;
                 err = BZ2_bzCompress(&zi->ci.bstream, BZ_FINISH);
                 if (err == BZ_STREAM_END)
@@ -1635,6 +1817,101 @@ extern int ZEXPORT zipCloseFileInZipRaw64(zipFile file, uint64_t uncompressed_si
 
             if (err == BZ_FINISH_OK)
                 err = ZIP_OK;
+#endif
+        }
+        else if (zi->ci.compression_method == Z_LZMAED)
+        {
+#ifdef HAVE_LZMA
+            /* Emit the properties header, then compress all buffered input
+               data using LZMA with streaming output */
+            if (zi->ci.lzma_enc != NULL)
+            {
+                CLzmaEncProps props;
+                CLzmaOutStream out_stream;
+                CLzmaInStream in_stream;
+                Byte lzma_header[4 + LZMA_PROPS_SIZE];
+                SizeT props_size = LZMA_PROPS_SIZE;
+                SRes res;
+
+                /* Setup output stream */
+                out_stream.vt.Write = LzmaOutStream_Write;
+                out_stream.zi = zi;
+                out_stream.err = ZIP_OK;
+
+                /* Setup input stream - use empty buffer if no data was written */
+                in_stream.vt.Read = LzmaInStream_Read;
+                if (zi->ci.lzma_input_buffer != NULL)
+                {
+                    in_stream.data = zi->ci.lzma_input_buffer;
+                    in_stream.size = zi->ci.lzma_input_size;
+                }
+                else
+                {
+                    static const Byte empty_buf[1] = {0};
+                    in_stream.data = empty_buf;
+                    in_stream.size = 0;
+                }
+
+                /* Setup LZMA properties. reduceSize is what keeps the declared
+                   dictionary from dwarfing the data: a decoder allocates
+                   whatever dictionary size the properties advertise, so a small
+                   member must not ask it for the level default (256 MB at -9). */
+                LzmaEncProps_Init(&props);
+                props.level = zi->ci.lzma_level;
+                props.writeEndMark = 1;  /* Write end marker for proper stream termination */
+                props.reduceSize = zi->ci.lzma_input_size;
+                LzmaEncProps_Normalize(&props);
+
+                if ((LzmaEnc_SetProps(zi->ci.lzma_enc, &props) != SZ_OK) ||
+                    (LzmaEnc_WriteProperties(zi->ci.lzma_enc, lzma_header + 4, &props_size) != SZ_OK))
+                {
+                    err = ZIP_INTERNALERROR;
+                }
+                else
+                {
+                    /* Write LZMA header according to ZIP specification (appnote 5.8.8):
+                       - LZMA Version: 2 bytes (major, minor)
+                       - Properties Size: 2 bytes (little-endian)
+                       - Properties Data: variable (typically 5 bytes) */
+                    SizeT header_size = 4 + props_size;
+
+                    lzma_header[0] = (Byte)MY_VER_MAJOR;  /* LZMA SDK major version */
+                    lzma_header[1] = (Byte)MY_VER_MINOR;  /* LZMA SDK minor version */
+                    lzma_header[2] = (Byte)(props_size & 0xFF);
+                    lzma_header[3] = (Byte)((props_size >> 8) & 0xFF);
+
+                    /* Write the header through the buffering system to ensure proper
+                       synchronization with file position and encryption handling */
+                    if (LzmaOutStream_Write(&out_stream.vt, lzma_header, header_size) != header_size)
+                    {
+                        err = (out_stream.err != ZIP_OK) ? out_stream.err : ZIP_ERRNO;
+                    }
+                    else
+                    {
+                        /* Let the match finder size itself for the actual input */
+                        LzmaEnc_SetDataSize(zi->ci.lzma_enc, zi->ci.lzma_input_size);
+
+                        /* Perform LZMA encoding with streaming output */
+                        res = LzmaEnc_Encode(zi->ci.lzma_enc,
+                                             &out_stream.vt, &in_stream.vt,
+                                             NULL, &g_Alloc, &g_Alloc);
+
+                        if (res != SZ_OK || out_stream.err != ZIP_OK)
+                        {
+                            err = (out_stream.err != ZIP_OK) ? out_stream.err : ZIP_INTERNALERROR;
+                        }
+                        else
+                        {
+                            zi->ci.total_uncompressed += zi->ci.lzma_input_size;
+                            err = Z_STREAM_END;
+                        }
+                    }
+                }
+            }
+            else
+            {
+                err = Z_STREAM_END;
+            }
 #endif
         }
     }
@@ -1679,6 +1956,24 @@ extern int ZEXPORT zipCloseFileInZipRaw64(zipFile file, uint64_t uncompressed_si
             zi->ci.stream_initialised = 0;
         }
 #endif
+#ifdef HAVE_LZMA
+        else if (zi->ci.compression_method == Z_LZMAED)
+        {
+            if (zi->ci.lzma_enc != NULL)
+            {
+                LzmaEnc_Destroy(zi->ci.lzma_enc, &g_Alloc, &g_Alloc);
+                zi->ci.lzma_enc = NULL;
+            }
+            if (zi->ci.lzma_input_buffer != NULL)
+            {
+                free(zi->ci.lzma_input_buffer);
+                zi->ci.lzma_input_buffer = NULL;
+            }
+            zi->ci.lzma_input_size = 0;
+            zi->ci.lzma_input_capacity = 0;
+            zi->ci.stream_initialised = 0;
+        }
+#endif
 
         crc32 = zi->ci.crc32;
         uncompressed_size = zi->ci.total_uncompressed;
@@ -1690,15 +1985,24 @@ extern int ZEXPORT zipCloseFileInZipRaw64(zipFile file, uint64_t uncompressed_si
         if (uncompressed_size >= UINT32_MAX || zi->ci.total_compressed >= UINT32_MAX)
             zi->ci.zip64 = 1;
 
-        /* Update local header version if zip64 became necessary due to file size */
+        /* Update version needed to extract if zip64 became necessary due to
+           file size. Take the highest requirement so a method that already
+           asked for more (LZMA wants 6.3) is not downgraded to 4.5 here. */
         if (zi->ci.zip64 && !was_zip64)
         {
             uint64_t cur_pos = ZTELL64(zi->z_filefunc, zi->filestream);
+
+            if (zi->ci.version_needed < 45)
+                zi->ci.version_needed = 45;
+
             if (ZSEEK64(zi->z_filefunc, zi->filestream, zi->ci.pos_local_header + 4, ZLIB_FILEFUNC_SEEK_SET) == 0)
             {
-                zipWriteValue(&zi->z_filefunc, zi->filestream, (uint16_t)45, 2); /* version needed to extract */
+                zipWriteValue(&zi->z_filefunc, zi->filestream, zi->ci.version_needed, 2); /* version needed to extract */
                 ZSEEK64(zi->z_filefunc, zi->filestream, cur_pos, ZLIB_FILEFUNC_SEEK_SET);
             }
+
+            /* The central directory keeps its own copy of the field */
+            zipWriteValueToMemory(zi->ci.central_header + 6, zi->ci.version_needed, 2);
         }
     }
 

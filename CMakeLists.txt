@@ -89,6 +89,42 @@ if(USE_DEFLATE64)
   add_definitions(-DHAVE_DEFLATE64)
 endif()
 
+# Configure BZIP2 support
+option(USE_BZIP2 "enables BZIP2 compression support" ON)
+if(USE_BZIP2)
+  # Add BZIP2 implementation files
+  list(APPEND MINIZIP_SRC
+    "bzlib/blocksort.c"
+    "bzlib/bzlib.c"
+    "bzlib/compress.c"
+    "bzlib/crctable.c"
+    "bzlib/decompress.c"
+    "bzlib/huffman.c"
+    "bzlib/randtable.c")
+  list(APPEND MINIZIP_PUBLIC_HEADERS
+    "bzlib/bzlib.h"
+    "bzlib/bzlib_private.h")
+
+  add_definitions(-DHAVE_BZIP2)
+endif()
+
+# Configure LZMA support
+# Note: LZMA support requires additional files from LZMA SDK (LzFind.c, etc.)
+# These files are not included by default due to their size
+option(USE_LZMA "enables LZMA compression support" OFF)
+if(USE_LZMA)
+  # Add LZMA implementation files
+  list(APPEND MINIZIP_SRC
+    "lzma/LzmaEnc.c"
+    "lzma/LzmaDec.c")
+  list(APPEND MINIZIP_PUBLIC_HEADERS
+    "lzma/LzmaEnc.h"
+    "lzma/LzmaDec.h"
+    "lzma/7zTypes.h")
+
+  add_definitions(-DHAVE_LZMA)
+endif()
+
 # create minizip library
 add_library(minizip ${MINIZIP_SRC} ${MINIZIP_PUBLIC_HEADERS})
 target_link_libraries(minizip ZLIB::ZLIB)

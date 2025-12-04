@@ -187,8 +187,9 @@ extern int ZEXPORT zipOpenNewFileInZip5(zipFile file,
                                         int memLevel,
                                         int strategy,
                                         const char *password,
-                                        int aes);
-/* Allowing optional aes */
+                                        int aes,
+                                        uint16_t version_madeby);
+/* Allowing optional aes and version_madeby */
 
 extern int ZEXPORT zipWriteInFileInZip(zipFile file, const void *buf, uint32_t len);
 /* Write data in the zipfile */
