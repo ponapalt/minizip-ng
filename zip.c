@@ -945,6 +945,10 @@ extern int ZEXPORT zipOpenNewFileInZip_internal(zipFile file,
 
     size_filename = (uint16_t)strlen(filename);
 
+    /* Reject Unix symbolic links (S_IFLNK: upper 16 bits of external_fa == 0xA000) */
+    if ((zipfi != NULL) && (((zipfi->external_fa >> 16) & 0xF000) == 0xA000))
+        return ZIP_PARAMERROR;
+
     if (zipfi == NULL)
         zi->ci.dos_date = 0;
     else

@@ -1,0 +1,4 @@
+- 言語: ANSI C (C89/C90) / Visual C++ 6
+- ソース管理: git (github)
+- コメントは英語で
+- doc/appnote.txt にPKZIP appnoteを配置済

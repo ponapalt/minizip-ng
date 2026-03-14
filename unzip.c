@@ -1048,6 +1048,10 @@ extern int ZEXPORT unzOpenCurrentFile3(unzFile file, int *method, int *level, in
     if (!s->current_file_ok)
         return UNZ_PARAMERROR;
 
+    /* Reject Unix symbolic links (S_IFLNK: upper 16 bits of external_fa == 0xA000) */
+    if (((s->cur_file_info.external_fa >> 16) & 0xF000) == 0xA000)
+        return UNZ_PARAMERROR;
+
     if (s->pfile_in_zip_read != NULL)
         unzCloseCurrentFile(file);
 
