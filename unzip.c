@@ -386,8 +386,22 @@ static unzFile unzOpenInternal(const void *path, zlib_filefunc64_32_def *pzlib_f
             err = UNZ_ERRNO;
         us.offset_central_dir = value32;
         /* Zipfile comment length */
-        if (unzReadUInt16(&us.z_filefunc, us.filestream, &us.gi.size_comment) != UNZ_OK)
-            err = UNZ_ERRNO;
+        {
+            uint8_t comment_len_buf[2] = {0, 0};
+            uint32_t comment_len_read = (uint32_t)ZREAD64(us.z_filefunc, us.filestream, comment_len_buf, 2);
+            if (comment_len_read == 2)
+            {
+                us.gi.size_comment = (uint16_t)comment_len_buf[0];
+                us.gi.size_comment |= ((uint16_t)comment_len_buf[1]) << 8;
+            }
+            else if (ZERROR64(us.z_filefunc, us.filestream))
+                err = UNZ_ERRNO;
+            else
+                /* The comment length field, the very last bytes of the archive, is truncated.
+                   The comment carries no archive data, so treat it as absent instead of
+                   rejecting the whole archive. */
+                us.gi.size_comment = 0;
+        }
 
         if (err == UNZ_OK)
         {
