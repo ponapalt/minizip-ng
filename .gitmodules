@@ -1,0 +1,6 @@
+[submodule "lzma"]
+	path = lzma
+	url = https://github.com/ponapalt/lzma-sdk.git
+[submodule "brotli"]
+	path = brotli
+	url = https://github.com/ponapalt/brotli.git
