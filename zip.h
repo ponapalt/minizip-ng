@@ -40,6 +40,12 @@ extern "C" {
 #define Z_BZIP2ED    12
 #define Z_LZMAED     14
 #define Z_DEFLATE64ED 9
+/* Decompression-only methods; defined here to keep the identifiers in sync
+   with unzip.h. Compression for these methods is not implemented. */
+#define Z_ZSTDED_DEPRECATED 20
+#define Z_ZSTDED     93
+#define Z_XZED       95
+#define Z_PPMDED     98
 
 #if defined(STRICTZIP) || defined(STRICTZIPUNZIP)
 /* like the STRICT of WIN32, we define a pointer that cannot be converted

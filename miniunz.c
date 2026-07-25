@@ -120,6 +120,19 @@ int miniunz_list(unzFile uf)
 		{
             string_method = "Dfl64 ";
 		}
+		else if ( file_info.compression_method == Z_ZSTDED ||
+		          file_info.compression_method == Z_ZSTDED_DEPRECATED)
+		{
+            string_method = "Zstd  ";
+		}
+		else if ( file_info.compression_method == Z_XZED)
+		{
+            string_method = "XZ    ";
+		}
+		else if ( file_info.compression_method == Z_PPMDED)
+		{
+            string_method = "PPMd  ";
+		}
         else
             string_method = "Unkn. ";
 

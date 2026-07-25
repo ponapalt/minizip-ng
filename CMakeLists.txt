@@ -125,6 +125,70 @@ if(USE_LZMA)
   add_definitions(-DHAVE_LZMA)
 endif()
 
+# Configure Zstandard support (decompression only)
+option(USE_ZSTD "enables Zstandard decompression support" OFF)
+if(USE_ZSTD)
+  list(APPEND MINIZIP_SRC
+    "lzma/ZstdDec.c"
+    "lzma/Xxh64.c"
+    "lzma/CpuArch.c"
+    "lzma/Alloc.c")
+  list(APPEND MINIZIP_PUBLIC_HEADERS
+    "lzma/ZstdDec.h"
+    "lzma/Xxh64.h"
+    "lzma/7zTypes.h")
+
+  add_definitions(-DHAVE_ZSTD)
+endif()
+
+# Configure XZ support (decompression only)
+option(USE_XZ "enables XZ decompression support" OFF)
+if(USE_XZ)
+  list(APPEND MINIZIP_SRC
+    "lzma/Xz.c"
+    "lzma/XzDec.c"
+    "lzma/XzCrc64.c"
+    "lzma/XzCrc64Opt.c"
+    "lzma/Lzma2Dec.c"
+    "lzma/LzmaDec.c"
+    "lzma/Bra.c"
+    "lzma/Bra86.c"
+    "lzma/Delta.c"
+    "lzma/7zCrc.c"
+    "lzma/7zCrcOpt.c"
+    "lzma/CpuArch.c"
+    "lzma/Alloc.c")
+  list(APPEND MINIZIP_PUBLIC_HEADERS
+    "lzma/Xz.h"
+    "lzma/XzCrc64.h"
+    "lzma/7zCrc.h"
+    "lzma/7zTypes.h")
+
+  # Single threaded build, avoids MtDec.c / Threads.c
+  add_definitions(-DZ7_ST)
+  add_definitions(-DHAVE_XZ)
+endif()
+
+# Configure PPMd support (decompression only)
+# ZIP method 98 is PPMd var. I rev. 1, which is Ppmd8 in the LZMA SDK
+option(USE_PPMD "enables PPMd decompression support" OFF)
+if(USE_PPMD)
+  list(APPEND MINIZIP_SRC
+    "lzma/Ppmd8.c"
+    "lzma/Ppmd8Dec.c"
+    "lzma/Alloc.c")
+  list(APPEND MINIZIP_PUBLIC_HEADERS
+    "lzma/Ppmd8.h"
+    "lzma/Ppmd.h"
+    "lzma/7zTypes.h")
+
+  add_definitions(-DHAVE_PPMD)
+endif()
+
+# The LZMA SDK options above share several source files
+list(REMOVE_DUPLICATES MINIZIP_SRC)
+list(REMOVE_DUPLICATES MINIZIP_PUBLIC_HEADERS)
+
 # create minizip library
 add_library(minizip ${MINIZIP_SRC} ${MINIZIP_PUBLIC_HEADERS})
 target_link_libraries(minizip ZLIB::ZLIB)

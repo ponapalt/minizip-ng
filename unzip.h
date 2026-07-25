@@ -20,6 +20,9 @@
 #define _UNZ_H
 
 #define HAVE_LZMA
+#define HAVE_XZ
+#define HAVE_ZSTD
+#define HAVE_PPMD
 #define HAVE_BZIP2
 #define HAVE_AES
 #define HAVE_DEFLATE64
@@ -44,9 +47,30 @@ extern "C" {
 #include "lzma/LzmaDec.h"
 #endif
 
+#ifdef HAVE_XZ
+#include "lzma/Xz.h"
+#endif
+
+#ifdef HAVE_ZSTD
+/* ZstdDec.h has no includes of its own and relies on the 7-Zip base types */
+#include "lzma/7zTypes.h"
+#include "lzma/ZstdDec.h"
+#endif
+
+#ifdef HAVE_PPMD
+#include "lzma/Ppmd8.h"
+#endif
+
 #define Z_BZIP2ED    12
 #define Z_LZMAED     14
 #define Z_DEFLATE64ED 9
+/* Zstandard was first assigned method 20, which later conflicted with the
+   "Deflate64 / reserved" range, so the format settled on method 93.
+   Both identifiers are accepted when reading. */
+#define Z_ZSTDED_DEPRECATED 20
+#define Z_ZSTDED     93
+#define Z_XZED       95
+#define Z_PPMDED     98
 
 #if defined(STRICTUNZIP) || defined(STRICTZIPUNZIP)
 /* like the STRICT of WIN32, we define a pointer that cannot be converted

@@ -46,6 +46,12 @@
 #  include "deflate64/infback9.h"
 #endif
 
+#ifdef HAVE_XZ
+/* CRC tables used by the xz integrity checks */
+#  include "lzma/7zCrc.h"
+#  include "lzma/XzCrc64.h"
+#endif
+
 #define DISKHEADERMAGIC             (0x08074b50)
 #define LOCALHEADERMAGIC            (0x04034b50)
 #define CENTRALHEADERMAGIC          (0x02014b50)
@@ -89,18 +95,47 @@ typedef struct unz_file_info64_internal_s
 #endif
 } unz_file_info64_internal;
 
-/* file_in_zip_read_info_s contain internal information about a file in zipfile */
+#ifdef HAVE_PPMD
+/* PPMd pulls its input one byte at a time through an IByteIn interface, so it
+   needs an adapter that can refill the zipfile read buffer on demand. The
+   adapter refers back to the enclosing read info, hence the forward declaration. */
+struct file_in_zip64_read_info_s_;
+
 typedef struct
+{
+    IByteIn vt;                         /* must be the first member */
+    void    *file;                      /* unzFile, for unzRefillInputBuffer */
+    struct file_in_zip64_read_info_s_ *pfile;
+    int     eof;                        /* set when the input is exhausted */
+} unz_ppmd_bytein;
+#endif
+
+/* file_in_zip_read_info_s contain internal information about a file in zipfile */
+typedef struct file_in_zip64_read_info_s_
 {
     uint8_t *read_buffer;               /* internal buffer for compressed data */
     z_stream stream;                    /* zLib stream structure for inflate */
 #ifdef HAVE_BZIP2
     bz_stream bstream;                  /* bzLib stream structure for bziped */
 #endif
+#if defined(HAVE_LZMA) || defined(HAVE_XZ) || defined(HAVE_ZSTD) || defined(HAVE_PPMD)
+    ISzAlloc sz_alloc;                  /* allocator shared by all 7-Zip SDK decoders */
+#endif
 #ifdef HAVE_LZMA
 	CLzmaDec lzma_stream;
-	ISzAlloc lzma_alloc;
 	int      lzma_init;
+#endif
+#ifdef HAVE_XZ
+    CXzUnpacker xz_stream;
+#endif
+#ifdef HAVE_ZSTD
+    CZstdDecHandle zstd_dec;
+    CZstdDecState  zstd_state;
+#endif
+#ifdef HAVE_PPMD
+    CPpmd8   ppmd_stream;
+    unz_ppmd_bytein ppmd_in;
+    int      ppmd_init;
 #endif
 #ifdef HAVE_DEFLATE64
     z_stream d64_stream;                /* stream for deflate64 */
@@ -1000,6 +1035,16 @@ static int unzCheckCurrentFileCoherencyHeader(unz64_internal *s, uint32_t *psize
 #ifdef HAVE_DEFLATE64
         if (compression_method != Z_DEFLATE64ED)
 #endif
+#ifdef HAVE_ZSTD
+        if (compression_method != Z_ZSTDED)
+        if (compression_method != Z_ZSTDED_DEPRECATED)
+#endif
+#ifdef HAVE_XZ
+        if (compression_method != Z_XZED)
+#endif
+#ifdef HAVE_PPMD
+        if (compression_method != Z_PPMDED)
+#endif
             err = UNZ_BADCOMPMETHOD;
     }
 
@@ -1036,13 +1081,29 @@ static int unzCheckCurrentFileCoherencyHeader(unz64_internal *s, uint32_t *psize
   Open for reading data the current file in the zipfile.
   If there is no error and the file is opened, the return value is UNZ_OK.
 */
-#ifdef HAVE_LZMA
-static void* unzLzmaAlloc(ISzAllocPtr p, size_t size)
+#if defined(HAVE_LZMA) || defined(HAVE_XZ) || defined(HAVE_ZSTD) || defined(HAVE_PPMD)
+static void* unzSzAlloc(ISzAllocPtr p, size_t size)
 {
 	return malloc(size);
 }
-static void unzLzmaFree(ISzAllocPtr p, void *addr) {
+static void unzSzFree(ISzAllocPtr p, void *addr) {
 	free(addr);
+}
+#endif
+
+#ifdef HAVE_XZ
+/* The xz decoder relies on the global CRC32/CRC64 tables of the 7-Zip SDK.
+   They only have to be built once per process. */
+static int unz_xz_crc_tables_generated = 0;
+
+static void unzXzInitCrcTables(void)
+{
+    if (!unz_xz_crc_tables_generated)
+    {
+        CrcGenerateTable();
+        Crc64GenerateTable();
+        unz_xz_crc_tables_generated = 1;
+    }
 }
 #endif
 
@@ -1096,6 +1157,13 @@ extern int ZEXPORT unzOpenCurrentFile3(unzFile file, int *method, int *level, in
     if (method != NULL)
         *method = compression_method;
 
+#ifdef HAVE_ZSTD
+    /* Report the method id as stored, but normalise the legacy Zstandard id so
+       that only Z_ZSTDED has to be handled from here on */
+    if (compression_method == Z_ZSTDED_DEPRECATED)
+        compression_method = Z_ZSTDED;
+#endif
+
     if (level != NULL)
     {
         *level = 6;
@@ -1117,6 +1185,15 @@ extern int ZEXPORT unzOpenCurrentFile3(unzFile file, int *method, int *level, in
 #endif
 #ifdef HAVE_DEFLATE64
         if (compression_method != Z_DEFLATE64ED)
+#endif
+#ifdef HAVE_ZSTD
+        if (compression_method != Z_ZSTDED)
+#endif
+#ifdef HAVE_XZ
+        if (compression_method != Z_XZED)
+#endif
+#ifdef HAVE_PPMD
+        if (compression_method != Z_PPMDED)
 #endif
             return UNZ_BADCOMPMETHOD;
     }
@@ -1167,6 +1244,14 @@ extern int ZEXPORT unzOpenCurrentFile3(unzFile file, int *method, int *level, in
     pfile_in_zip_read_info->stream.next_in = NULL;
     pfile_in_zip_read_info->stream.avail_in = 0;
 
+#if defined(HAVE_LZMA) || defined(HAVE_XZ) || defined(HAVE_ZSTD) || defined(HAVE_PPMD)
+    pfile_in_zip_read_info->sz_alloc.Alloc = unzSzAlloc;
+    pfile_in_zip_read_info->sz_alloc.Free = unzSzFree;
+#endif
+#ifdef HAVE_ZSTD
+    pfile_in_zip_read_info->zstd_dec = NULL;
+#endif
+
     if (!raw)
     {
         if (compression_method == Z_BZIP2ED)
@@ -1198,9 +1283,55 @@ extern int ZEXPORT unzOpenCurrentFile3(unzFile file, int *method, int *level, in
 			memset(&pfile_in_zip_read_info->lzma_stream,0,sizeof(pfile_in_zip_read_info->lzma_stream));
             LzmaDec_Construct(&pfile_in_zip_read_info->lzma_stream);
 			pfile_in_zip_read_info->lzma_init = 0;
-			pfile_in_zip_read_info->lzma_alloc.Alloc = unzLzmaAlloc;
-			pfile_in_zip_read_info->lzma_alloc.Free = unzLzmaFree;
             pfile_in_zip_read_info->stream_initialised = Z_LZMAED;
+#else
+            pfile_in_zip_read_info->raw = 1;
+#endif
+        }
+        else if (compression_method == Z_XZED)
+        {
+#ifdef HAVE_XZ
+            unzXzInitCrcTables();
+
+            XzUnpacker_Construct(&pfile_in_zip_read_info->xz_stream,
+                                 &pfile_in_zip_read_info->sz_alloc);
+            XzUnpacker_Init(&pfile_in_zip_read_info->xz_stream);
+            pfile_in_zip_read_info->stream_initialised = Z_XZED;
+#else
+            pfile_in_zip_read_info->raw = 1;
+#endif
+        }
+        else if (compression_method == Z_ZSTDED)
+        {
+#ifdef HAVE_ZSTD
+            pfile_in_zip_read_info->zstd_dec = ZstdDec_Create(&pfile_in_zip_read_info->sz_alloc,
+                                                              &pfile_in_zip_read_info->sz_alloc);
+            if (pfile_in_zip_read_info->zstd_dec == NULL)
+            {
+                TRYFREE(pfile_in_zip_read_info->read_buffer);
+                TRYFREE(pfile_in_zip_read_info);
+                return UNZ_INTERNALERROR;
+            }
+
+            ZstdDecState_Clear(&pfile_in_zip_read_info->zstd_state);
+            ZstdDec_Init(pfile_in_zip_read_info->zstd_dec);
+
+            /* Leave outBuf_fromCaller at NULL: that selects the decoder's own
+               cyclic window, which allows streaming without having to allocate
+               a buffer for the whole uncompressed size */
+            pfile_in_zip_read_info->stream_initialised = Z_ZSTDED;
+#else
+            pfile_in_zip_read_info->raw = 1;
+#endif
+        }
+        else if (compression_method == Z_PPMDED)
+        {
+#ifdef HAVE_PPMD
+            /* The two property bytes precede the compressed data, so the model
+               itself can only be allocated once the first bytes are available */
+            Ppmd8_Construct(&pfile_in_zip_read_info->ppmd_stream);
+            pfile_in_zip_read_info->ppmd_init = 0;
+            pfile_in_zip_read_info->stream_initialised = Z_PPMDED;
 #else
             pfile_in_zip_read_info->raw = 1;
 #endif
@@ -1358,8 +1489,7 @@ extern int ZEXPORT unzOpenCurrentFile2(unzFile file, int *method, int *level, in
     return unzOpenCurrentFile3(file, method, level, raw, NULL);
 }
 
-#ifdef HAVE_DEFLATE64
-/* Helper function to refill input buffer for Deflate64 */
+/* Helper function to refill the compressed input buffer */
 static int unzRefillInputBuffer(unzFile file)
 {
     unz64_internal *s;
@@ -1442,6 +1572,33 @@ static int unzRefillInputBuffer(unzFile file)
     pfile->stream.avail_in = (uInt)(bytes_not_read + total_bytes_read);
 
     return UNZ_OK;
+}
+
+#ifdef HAVE_PPMD
+/* IByteIn implementation feeding the PPMd decoder from the zipfile read buffer.
+   The stream fields are looked up through pfile on every call because
+   unzRefillInputBuffer() moves next_in back to the start of read_buffer. */
+static Byte unzPpmdReadByte(IByteInPtr pp)
+{
+    unz_ppmd_bytein *p = Z7_CONTAINER_FROM_VTBL(pp, unz_ppmd_bytein, vt);
+    file_in_zip64_read_info_s *pfile = p->pfile;
+    Byte b;
+
+    if (pfile->stream.avail_in == 0)
+    {
+        if ((pfile->rest_read_compressed == 0) ||
+            (unzRefillInputBuffer(p->file) != UNZ_OK) ||
+            (pfile->stream.avail_in == 0))
+        {
+            p->eof = 1;
+            return 0;
+        }
+    }
+
+    b = *pfile->stream.next_in;
+    pfile->stream.next_in++;
+    pfile->stream.avail_in--;
+    return b;
 }
 #endif
 
@@ -1726,8 +1883,8 @@ extern int ZEXPORT unzReadCurrentFile(unzFile file, unzWriteCallback write_cb, v
         {
 #ifdef HAVE_LZMA
             ELzmaStatus lzma_state = LZMA_STATUS_NOT_FINISHED;
-            uint32_t in_bytes = 0;
-            uint32_t out_bytes = 0;
+            SizeT in_bytes = 0;
+            SizeT out_bytes = 0;
             const uint8_t *buf_before = NULL;
             ELzmaFinishMode fmode = LZMA_FINISH_ANY;
             SRes lzma_err;
@@ -1759,9 +1916,9 @@ extern int ZEXPORT unzReadCurrentFile(unzFile file, unzWriteCallback write_cb, v
                 if (LzmaDec_Allocate(&pfile->lzma_stream,
                                      pfile->stream.next_in,
                                      propsize,
-                                     &pfile->lzma_alloc) != SZ_OK)
+                                     &pfile->sz_alloc) != SZ_OK)
                 {
-                    LzmaDec_Free(&pfile->lzma_stream, &pfile->lzma_alloc);
+                    LzmaDec_Free(&pfile->lzma_stream, &pfile->sz_alloc);
                     TRYFREE(temp_buf);
                     return UNZ_ERRNO;
                 }
@@ -1780,24 +1937,32 @@ extern int ZEXPORT unzReadCurrentFile(unzFile file, unzWriteCallback write_cb, v
             if (pfile->rest_read_uncompressed <= out_bytes)
             {
                 fmode = LZMA_FINISH_END;
-                out_bytes = (uint32_t)pfile->rest_read_uncompressed;
+                out_bytes = (SizeT)pfile->rest_read_uncompressed;
             }
 
             lzma_err = LzmaDec_DecodeToBuf(&pfile->lzma_stream, pfile->stream.next_out,
                                            &out_bytes, pfile->stream.next_in, &in_bytes,
                                            fmode, &lzma_state);
 
+            if (lzma_err != SZ_OK)
+            {
+                TRYFREE(temp_buf);
+                if (lzma_err == SZ_ERROR_MEM)
+                    return Z_MEM_ERROR;
+                return Z_DATA_ERROR;
+            }
+
             pfile->stream.next_in += in_bytes;
-            pfile->stream.avail_in -= in_bytes;
+            pfile->stream.avail_in -= (uInt)in_bytes;
             pfile->stream.next_out += out_bytes;
-            pfile->stream.avail_out -= out_bytes;
+            pfile->stream.avail_out -= (uInt)out_bytes;
 
             pfile->total_out_64 += out_bytes;
             pfile->rest_read_uncompressed -= out_bytes;
-            pfile->crc32 = crc32(pfile->crc32, buf_before, out_bytes);
+            pfile->crc32 = (uint32_t)crc32(pfile->crc32, buf_before, (uint32_t)out_bytes);
 
             out_data = buf_before;
-            out_size = out_bytes;
+            out_size = (uint32_t)out_bytes;
 
             if (lzma_state == LZMA_STATUS_FINISHED_WITH_MARK ||
                 lzma_state == LZMA_STATUS_MAYBE_FINISHED_WITHOUT_MARK)
@@ -1815,6 +1980,263 @@ extern int ZEXPORT unzReadCurrentFile(unzFile file, unzWriteCallback write_cb, v
                 return UNZ_EOF;
             }
             if (pfile->rest_read_uncompressed == 0)
+            {
+                if (out_size > 0)
+                {
+                    cb_result = write_cb(opaque, out_data, out_size);
+                    if (cb_result < 0)
+                    {
+                        TRYFREE(temp_buf);
+                        return UNZ_ERRNO;
+                    }
+                }
+                TRYFREE(temp_buf);
+                return UNZ_EOF;
+            }
+#else
+            TRYFREE(temp_buf);
+            return UNZ_BADCOMPMETHOD;
+#endif
+        }
+        else if (pfile->compression_method == Z_XZED)
+        {
+#ifdef HAVE_XZ
+            ECoderStatus xz_status = CODER_STATUS_NOT_SPECIFIED;
+            SizeT in_bytes;
+            SizeT out_bytes;
+            const uint8_t *buf_before;
+            SRes xz_err;
+
+            in_bytes = (SizeT)pfile->stream.avail_in;
+            out_bytes = (SizeT)pfile->stream.avail_out;
+            buf_before = pfile->stream.next_out;
+
+            if (pfile->rest_read_uncompressed < (uint64_t)out_bytes)
+                out_bytes = (SizeT)pfile->rest_read_uncompressed;
+
+            xz_err = XzUnpacker_Code(&pfile->xz_stream,
+                                     pfile->stream.next_out, &out_bytes,
+                                     pfile->stream.next_in, &in_bytes,
+                                     (pfile->rest_read_compressed == 0),
+                                     CODER_FINISH_ANY, &xz_status);
+
+            if (xz_err != SZ_OK)
+            {
+                TRYFREE(temp_buf);
+                if (xz_err == SZ_ERROR_MEM)
+                    return Z_MEM_ERROR;
+                return Z_DATA_ERROR;
+            }
+
+            pfile->stream.next_in += in_bytes;
+            pfile->stream.avail_in -= (uInt)in_bytes;
+            pfile->stream.next_out += out_bytes;
+            pfile->stream.avail_out -= (uInt)out_bytes;
+
+            pfile->total_out_64 += out_bytes;
+            pfile->rest_read_uncompressed -= out_bytes;
+            pfile->crc32 = (uint32_t)crc32(pfile->crc32, buf_before, (uint32_t)out_bytes);
+
+            out_data = buf_before;
+            out_size = (uint32_t)out_bytes;
+
+            if ((xz_status == CODER_STATUS_FINISHED_WITH_MARK) ||
+                (pfile->rest_read_uncompressed == 0))
+            {
+                if (out_size > 0)
+                {
+                    cb_result = write_cb(opaque, out_data, out_size);
+                    if (cb_result < 0)
+                    {
+                        TRYFREE(temp_buf);
+                        return UNZ_ERRNO;
+                    }
+                }
+                TRYFREE(temp_buf);
+                return UNZ_EOF;
+            }
+
+            /* No progress and no more input means the stream is truncated */
+            if ((in_bytes == 0) && (out_bytes == 0) && (pfile->rest_read_compressed == 0))
+            {
+                TRYFREE(temp_buf);
+                return Z_DATA_ERROR;
+            }
+#else
+            TRYFREE(temp_buf);
+            return UNZ_BADCOMPMETHOD;
+#endif
+        }
+        else if (pfile->compression_method == Z_ZSTDED)
+        {
+#ifdef HAVE_ZSTD
+            SRes zstd_err;
+            size_t flush_size;
+
+            /* The decoder writes into its own cyclic window, so the data is
+               handed to the callback straight from that window instead of
+               going through temp_buf */
+            pfile->zstd_state.inBuf = pfile->stream.next_in;
+            pfile->zstd_state.inPos = 0;
+            pfile->zstd_state.inLim = pfile->stream.avail_in;
+
+            zstd_err = ZstdDec_Decode(pfile->zstd_dec, &pfile->zstd_state);
+
+            pfile->stream.next_in += pfile->zstd_state.inPos;
+            pfile->stream.avail_in -= (uInt)pfile->zstd_state.inPos;
+
+            if (zstd_err != SZ_OK)
+            {
+                TRYFREE(temp_buf);
+                if (zstd_err == SZ_ERROR_MEM)
+                    return Z_MEM_ERROR;
+                return Z_DATA_ERROR;
+            }
+
+            /* Flush everything the decoder has produced; that always covers
+               the amount it asked for through needWrite_Size */
+            flush_size = pfile->zstd_state.winPos - pfile->zstd_state.wrPos;
+            if (flush_size > pfile->rest_read_uncompressed)
+                flush_size = (size_t)pfile->rest_read_uncompressed;
+
+            out_data = pfile->zstd_state.win + pfile->zstd_state.wrPos;
+            out_size = (uint32_t)flush_size;
+
+            pfile->zstd_state.wrPos = pfile->zstd_state.winPos;
+
+            pfile->total_out_64 += out_size;
+            pfile->rest_read_uncompressed -= out_size;
+            pfile->crc32 = (uint32_t)crc32(pfile->crc32, out_data, out_size);
+
+            if (pfile->rest_read_uncompressed == 0)
+            {
+                if (out_size > 0)
+                {
+                    cb_result = write_cb(opaque, out_data, out_size);
+                    if (cb_result < 0)
+                    {
+                        TRYFREE(temp_buf);
+                        return UNZ_ERRNO;
+                    }
+                }
+                TRYFREE(temp_buf);
+                return UNZ_EOF;
+            }
+
+            /* No progress and no more input means the stream is truncated */
+            if ((pfile->zstd_state.inPos == 0) && (out_size == 0) &&
+                (pfile->rest_read_compressed == 0))
+            {
+                TRYFREE(temp_buf);
+                return Z_DATA_ERROR;
+            }
+#else
+            TRYFREE(temp_buf);
+            return UNZ_BADCOMPMETHOD;
+#endif
+        }
+        else if (pfile->compression_method == Z_PPMDED)
+        {
+#ifdef HAVE_PPMD
+            const uint8_t *buf_before;
+            uint32_t decoded;
+            uint32_t want;
+            int finished = 0;
+
+            if (!pfile->ppmd_init)
+            {
+                uint16_t wppmd;
+                unsigned order;
+                unsigned restore;
+                UInt32 mem;
+
+                /* Two little-endian property bytes precede the payload
+                   (appnote 5.10.4) */
+                if (pfile->stream.avail_in < 2)
+                {
+                    TRYFREE(temp_buf);
+                    return UNZ_ERRNO;
+                }
+
+                wppmd = (uint16_t)(pfile->stream.next_in[0] |
+                                   (pfile->stream.next_in[1] << 8));
+                pfile->stream.next_in += 2;
+                pfile->stream.avail_in -= 2;
+
+                order = (unsigned)(wppmd & 0x0f) + 1;
+                mem = (UInt32)(((wppmd >> 4) & 0xff) + 1) << 20;
+                restore = (unsigned)(wppmd >> 12);
+
+                /* FREEZE mode is compiled out of the SDK (see Ppmd8.h), so
+                   PPMD8_RESTORE_METHOD_UNSUPPPORTED is the first value the
+                   decoder cannot handle */
+                if ((order < PPMD8_MIN_ORDER) || (order > PPMD8_MAX_ORDER) ||
+                    (restore >= PPMD8_RESTORE_METHOD_UNSUPPPORTED))
+                {
+                    TRYFREE(temp_buf);
+                    return UNZ_BADZIPFILE;
+                }
+
+                if (!Ppmd8_Alloc(&pfile->ppmd_stream, mem, &pfile->sz_alloc))
+                {
+                    TRYFREE(temp_buf);
+                    return Z_MEM_ERROR;
+                }
+
+                pfile->ppmd_in.vt.Read = unzPpmdReadByte;
+                pfile->ppmd_in.file = file;
+                pfile->ppmd_in.pfile = pfile;
+                pfile->ppmd_in.eof = 0;
+                pfile->ppmd_stream.Stream.In = &pfile->ppmd_in.vt;
+
+                if (!Ppmd8_Init_RangeDec(&pfile->ppmd_stream))
+                {
+                    TRYFREE(temp_buf);
+                    return UNZ_BADZIPFILE;
+                }
+
+                Ppmd8_Init(&pfile->ppmd_stream, order, restore);
+                pfile->ppmd_init = 1;
+            }
+
+            buf_before = pfile->stream.next_out;
+
+            want = pfile->stream.avail_out;
+            if (pfile->rest_read_uncompressed < (uint64_t)want)
+                want = (uint32_t)pfile->rest_read_uncompressed;
+
+            for (decoded = 0; decoded < want; decoded++)
+            {
+                int sym = Ppmd8_DecodeSymbol(&pfile->ppmd_stream);
+                if (sym < 0)
+                {
+                    if (sym == PPMD8_SYM_END)
+                    {
+                        finished = 1;
+                        break;
+                    }
+                    TRYFREE(temp_buf);
+                    return Z_DATA_ERROR;
+                }
+                if (pfile->ppmd_in.eof)
+                {
+                    TRYFREE(temp_buf);
+                    return Z_DATA_ERROR;
+                }
+                pfile->stream.next_out[decoded] = (uint8_t)sym;
+            }
+
+            pfile->stream.next_out += decoded;
+            pfile->stream.avail_out -= decoded;
+
+            pfile->total_out_64 += decoded;
+            pfile->rest_read_uncompressed -= decoded;
+            pfile->crc32 = (uint32_t)crc32(pfile->crc32, buf_before, decoded);
+
+            out_data = buf_before;
+            out_size = decoded;
+
+            if (finished || (pfile->rest_read_uncompressed == 0))
             {
                 if (out_size > 0)
                 {
@@ -1995,10 +2417,30 @@ extern int ZEXPORT unzCloseCurrentFile(unzFile file)
 #endif
 #ifdef HAVE_LZMA
     else if (pfile_in_zip_read_info->stream_initialised == Z_LZMAED) {
-		if ( s->pfile_in_zip_read->lzma_init ) {
-			LzmaDec_Free(&s->pfile_in_zip_read->lzma_stream,&s->pfile_in_zip_read->lzma_alloc);
+		if ( pfile_in_zip_read_info->lzma_init ) {
+			LzmaDec_Free(&pfile_in_zip_read_info->lzma_stream,&pfile_in_zip_read_info->sz_alloc);
 		}
 	}
+#endif
+#ifdef HAVE_XZ
+    else if (pfile_in_zip_read_info->stream_initialised == Z_XZED) {
+        /* also releases the OpenSSL EVP_MD_CTX used for the SHA-256 check */
+        XzUnpacker_Free(&pfile_in_zip_read_info->xz_stream);
+    }
+#endif
+#ifdef HAVE_ZSTD
+    else if (pfile_in_zip_read_info->stream_initialised == Z_ZSTDED) {
+        if (pfile_in_zip_read_info->zstd_dec != NULL) {
+            ZstdDec_Destroy(pfile_in_zip_read_info->zstd_dec);
+            pfile_in_zip_read_info->zstd_dec = NULL;
+        }
+    }
+#endif
+#ifdef HAVE_PPMD
+    else if (pfile_in_zip_read_info->stream_initialised == Z_PPMDED) {
+        /* safe after Ppmd8_Construct even if Ppmd8_Alloc was never reached */
+        Ppmd8_Free(&pfile_in_zip_read_info->ppmd_stream, &pfile_in_zip_read_info->sz_alloc);
+    }
 #endif
 #ifdef HAVE_DEFLATE64
     else if (pfile_in_zip_read_info->stream_initialised == Z_DEFLATE64ED) {
