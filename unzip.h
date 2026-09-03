@@ -64,9 +64,9 @@ extern "C" {
 #define Z_BZIP2ED    12
 #define Z_LZMAED     14
 #define Z_DEFLATE64ED 9
-/* Zstandard was first assigned method 20, which later conflicted with the
-   "Deflate64 / reserved" range, so the format settled on method 93.
-   Both identifiers are accepted when reading. */
+/* appnote.txt 4.4.5: method 20 is "deprecated (use method 93 for zstd)",
+   so archives written before the change still carry 20. Both identifiers are
+   accepted when reading. */
 #define Z_ZSTDED_DEPRECATED 20
 #define Z_ZSTDED     93
 #define Z_XZED       95

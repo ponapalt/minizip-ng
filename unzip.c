@@ -1283,7 +1283,7 @@ extern int ZEXPORT unzOpenCurrentFile3(unzFile file, int *method, int *level, in
             pfile_in_zip_read_info->raw = 1;
 #endif
         }
-        if (compression_method == Z_LZMAED)
+        else if (compression_method == Z_LZMAED)
         {
 #ifdef HAVE_LZMA
 			memset(&pfile_in_zip_read_info->lzma_stream,0,sizeof(pfile_in_zip_read_info->lzma_stream));
@@ -1508,6 +1508,19 @@ static int unzAccountOutput(file_in_zip64_read_info_s *pfile, const uint8_t *dat
     pfile->rest_read_uncompressed -= len;
     pfile->crc32 = (uint32_t)crc32(pfile->crc32, data, len);
     return UNZ_OK;
+}
+
+/* A decoder just signalled end of stream. That only means success when the
+   whole declared uncompressed size was really produced: unzCloseCurrentFile()
+   verifies the crc only once rest_read_uncompressed has reached 0, so a stream
+   that stops early would otherwise be reported as a clean end of file and the
+   truncated output would go unnoticed. Raw reads are exempt, they are not crc
+   checked either and they are clamped by the uncompressed size on purpose. */
+static int unzEndOfStream(const file_in_zip64_read_info_s *pfile)
+{
+    if ((pfile->raw) || (pfile->rest_read_uncompressed == 0))
+        return UNZ_EOF;
+    return UNZ_BADZIPFILE;
 }
 
 /* Helper function to refill the compressed input buffer */
@@ -1798,7 +1811,7 @@ extern int ZEXPORT unzReadCurrentFile(unzFile file, unzWriteCallback write_cb, v
         if (out_state.cb_error)
             return UNZ_ERRNO;
         if (err == Z_STREAM_END)
-            return UNZ_EOF;
+            return unzEndOfStream(pfile);
         if (err == Z_BUF_ERROR)
             return Z_DATA_ERROR;    /* ran out of input: truncated stream */
         if (err != Z_OK)
@@ -1924,7 +1937,7 @@ extern int ZEXPORT unzReadCurrentFile(unzFile file, unzWriteCallback write_cb, v
                     }
                 }
                 TRYFREE(temp_buf);
-                return UNZ_EOF;
+                return unzEndOfStream(pfile);
             }
             if (err != BZ_OK)
             {
@@ -2037,7 +2050,7 @@ extern int ZEXPORT unzReadCurrentFile(unzFile file, unzWriteCallback write_cb, v
                     }
                 }
                 TRYFREE(temp_buf);
-                return UNZ_EOF;
+                return unzEndOfStream(pfile);
             }
             if (pfile->rest_read_uncompressed == 0)
             {
@@ -2116,7 +2129,7 @@ extern int ZEXPORT unzReadCurrentFile(unzFile file, unzWriteCallback write_cb, v
                     }
                 }
                 TRYFREE(temp_buf);
-                return UNZ_EOF;
+                return unzEndOfStream(pfile);
             }
 
             /* No progress and no more input means the stream is truncated */
@@ -2157,12 +2170,21 @@ extern int ZEXPORT unzReadCurrentFile(unzFile file, unzWriteCallback write_cb, v
             }
 
             /* Flush everything the decoder has produced; that always covers
-               the amount it asked for through needWrite_Size */
+               the amount it asked for through needWrite_Size, and wrPos has to
+               advance over the whole range or the next ZstdDec_Decode() call
+               fails when it wraps the cyclic window.
+               The flush is deliberately not clamped to rest_read_uncompressed:
+               a frame that expands past the uncompressed size from the central
+               directory is a corrupt entry, and unzAccountOutput() below is
+               what has to report it. */
             flush_size = pfile->zstd_state.winPos - pfile->zstd_state.wrPos;
-            if (flush_size > pfile->rest_read_uncompressed)
-                flush_size = (size_t)pfile->rest_read_uncompressed;
 
-            out_data = pfile->zstd_state.win + pfile->zstd_state.wrPos;
+            /* win stays NULL until the decoder has allocated its window; never
+               hand a NULL pointer to crc32(), it returns 0 for one and would
+               reset the running crc */
+            out_data = (flush_size > 0) ?
+                (const uint8_t *)pfile->zstd_state.win + pfile->zstd_state.wrPos :
+                (const uint8_t *)temp_buf;
             out_size = (uint32_t)flush_size;
 
             pfile->zstd_state.wrPos = pfile->zstd_state.winPos;
@@ -2186,7 +2208,7 @@ extern int ZEXPORT unzReadCurrentFile(unzFile file, unzWriteCallback write_cb, v
                     }
                 }
                 TRYFREE(temp_buf);
-                return UNZ_EOF;
+                return unzEndOfStream(pfile);
             }
 
             /* No progress and no more input means the stream is truncated */
@@ -2317,7 +2339,7 @@ extern int ZEXPORT unzReadCurrentFile(unzFile file, unzWriteCallback write_cb, v
                     }
                 }
                 TRYFREE(temp_buf);
-                return UNZ_EOF;
+                return unzEndOfStream(pfile);
             }
 #else
             TRYFREE(temp_buf);
@@ -2365,7 +2387,7 @@ extern int ZEXPORT unzReadCurrentFile(unzFile file, unzWriteCallback write_cb, v
                     }
                 }
                 TRYFREE(temp_buf);
-                return UNZ_EOF;
+                return unzEndOfStream(pfile);
             }
             if (err != Z_OK)
             {
@@ -2387,7 +2409,7 @@ extern int ZEXPORT unzReadCurrentFile(unzFile file, unzWriteCallback write_cb, v
     }
 
     TRYFREE(temp_buf);
-    return UNZ_EOF;
+    return unzEndOfStream(pfile);
 }
 
 
