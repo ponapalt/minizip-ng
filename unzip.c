@@ -1972,19 +1972,20 @@ extern int ZEXPORT unzReadCurrentFile(unzFile file, unzWriteCallback write_cb, v
                 }
 
                 /* Read property size from LZMA magic header (bytes 2-3, little-endian) */
-                propsize = pfile->stream.next_in[2] | (pfile->stream.next_in[3] << 8);
+                propsize = (unsigned short)(pfile->stream.next_in[2] |
+                                            (pfile->stream.next_in[3] << 8));
 
-                pfile->stream.next_in += LZMA_MAGIC_SIZE;
-                pfile->stream.avail_in -= LZMA_MAGIC_SIZE;
-
-                /* Parse LZMA properties and allocate decoder */
-                if (pfile->stream.avail_in < propsize)
+                /* Nothing is consumed until the whole header is known to be
+                   there, so a failure here leaves the stream where it was */
+                if (pfile->stream.avail_in < (uInt)(LZMA_MAGIC_SIZE + propsize))
                 {
                     TRYFREE(temp_buf);
                     return UNZ_ERRNO;
                 }
+
+                /* Parse LZMA properties and allocate decoder */
                 if (LzmaDec_Allocate(&pfile->lzma_stream,
-                                     pfile->stream.next_in,
+                                     pfile->stream.next_in + LZMA_MAGIC_SIZE,
                                      propsize,
                                      &pfile->sz_alloc) != SZ_OK)
                 {
@@ -1992,8 +1993,9 @@ extern int ZEXPORT unzReadCurrentFile(unzFile file, unzWriteCallback write_cb, v
                     TRYFREE(temp_buf);
                     return UNZ_ERRNO;
                 }
-                pfile->stream.next_in += propsize;
-                pfile->stream.avail_in -= propsize;
+
+                pfile->stream.next_in += LZMA_MAGIC_SIZE + propsize;
+                pfile->stream.avail_in -= (uInt)(LZMA_MAGIC_SIZE + propsize);
 
                 LzmaDec_Init(&pfile->lzma_stream);
 
@@ -2064,7 +2066,17 @@ extern int ZEXPORT unzReadCurrentFile(unzFile file, unzWriteCallback write_cb, v
                     }
                 }
                 TRYFREE(temp_buf);
-                return UNZ_EOF;
+                return unzEndOfStream(pfile);
+            }
+
+            /* No progress and no more input means the stream is truncated.
+               LzmaDec_DecodeToBuf() reports that as a plain SZ_OK with both
+               counts left at zero, so without this the loop would spin
+               forever on a cut off member */
+            if ((in_bytes == 0) && (out_bytes == 0) && (pfile->rest_read_compressed == 0))
+            {
+                TRYFREE(temp_buf);
+                return Z_DATA_ERROR;
             }
 #else
             TRYFREE(temp_buf);
