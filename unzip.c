@@ -1213,6 +1213,12 @@ extern int ZEXPORT unzOpenCurrentFile3(unzFile file, int *method, int *level, in
 #ifdef HAVE_AES
     pfile_in_zip_read_info->aes_initialised = 0;
 #endif
+#ifdef HAVE_DEFLATE64
+    /* ALLOC does not zero the block, so make sure a raw read never sees a
+       stale d64_stream.state */
+    pfile_in_zip_read_info->d64_window = NULL;
+    memset(&pfile_in_zip_read_info->d64_stream, 0, sizeof(pfile_in_zip_read_info->d64_stream));
+#endif
 
     pfile_in_zip_read_info->filestream = s->filestream;
     pfile_in_zip_read_info->z_filefunc = s->z_filefunc;
@@ -1489,6 +1495,21 @@ extern int ZEXPORT unzOpenCurrentFile2(unzFile file, int *method, int *level, in
     return unzOpenCurrentFile3(file, method, level, raw, NULL);
 }
 
+/* Account for len bytes of decompressed output. The uncompressed size taken
+   from the central directory is a hard limit: a decoder producing more than
+   that means the archive is corrupt, so the caller must stop instead of
+   letting rest_read_uncompressed wrap around. */
+static int unzAccountOutput(file_in_zip64_read_info_s *pfile, const uint8_t *data, uint32_t len)
+{
+    if ((uint64_t)len > pfile->rest_read_uncompressed)
+        return UNZ_BADZIPFILE;
+
+    pfile->total_out_64 += len;
+    pfile->rest_read_uncompressed -= len;
+    pfile->crc32 = (uint32_t)crc32(pfile->crc32, data, len);
+    return UNZ_OK;
+}
+
 /* Helper function to refill the compressed input buffer */
 static int unzRefillInputBuffer(unzFile file)
 {
@@ -1615,7 +1636,8 @@ typedef struct {
     unzWriteCallback write_cb;  /* User's write callback */
     void *opaque;                /* User's opaque data */
     file_in_zip64_read_info_s *pfile;  /* File state for CRC and counters */
-    unsigned total_out;
+    int cb_error;                /* set when the user's callback failed */
+    int overflow;                /* set when more output than uncompressed_size */
 } d64_out_state;
 
 static unsigned d64_in_func(void FAR *in_desc, unsigned char FAR * FAR *buf)
@@ -1679,19 +1701,23 @@ static int d64_out_func(void FAR *out_desc, unsigned char FAR *buf, unsigned len
     if (len == 0)
         return 0;
 
-    /* Update CRC */
-    state->pfile->crc32 = (uint32_t)crc32(state->pfile->crc32, buf, len);
-
-    /* Update counters */
-    state->pfile->total_out_64 += len;
-    state->pfile->rest_read_uncompressed -= len;
-    state->total_out += len;
+    /* Update CRC and counters, refusing to go past the declared size */
+    if (unzAccountOutput(state->pfile, buf, len) != UNZ_OK)
+    {
+        state->overflow = 1;
+        return -1;
+    }
 
     /* Call user's write callback */
     cb_result = state->write_cb(state->opaque, buf, len);
+    if (cb_result < 0)
+    {
+        state->cb_error = 1;
+        return -1;
+    }
 
     /* Return 0 to continue, non-zero to stop */
-    return (cb_result < 0) ? -1 : 0;
+    return 0;
 }
 #endif
 
@@ -1721,12 +1747,19 @@ extern int ZEXPORT unzReadCurrentFile(unzFile file, unzWriteCallback write_cb, v
 
     pfile = s->pfile_in_zip_read;
 
-    /* Special handling for Deflate64 - use inflateBack9 with direct callback */
-    if (pfile->compression_method == Z_DEFLATE64ED)
+    /* Special handling for Deflate64 - use inflateBack9 with direct callback.
+       Raw reads never get here: the stream is not initialised in that case and
+       the generic pass-through loop below copies the data as-is. */
+    if ((pfile->compression_method == Z_DEFLATE64ED) && (!pfile->raw))
     {
 #ifdef HAVE_DEFLATE64
         d64_in_state in_state;
         d64_out_state out_state;
+
+        /* inflateBack9 decodes the whole stream in one call, so a second call
+           would restart the decoder on whatever input is left */
+        if (pfile->rest_read_uncompressed == 0)
+            return UNZ_EOF;
 
         /* Setup input state */
         in_state.next_in = pfile->stream.next_in;
@@ -1738,20 +1771,29 @@ extern int ZEXPORT unzReadCurrentFile(unzFile file, unzWriteCallback write_cb, v
         out_state.write_cb = write_cb;
         out_state.opaque = opaque;
         out_state.pfile = pfile;
-        out_state.total_out = 0;
+        out_state.cb_error = 0;
+        out_state.overflow = 0;
 
         /* Call inflateBack9 - it will decompress all data and call write_cb */
         err = inflateBack9(&pfile->d64_stream,
                           d64_in_func, &in_state,
                           d64_out_func, &out_state);
 
-        /* Update stream state */
-        pfile->stream.next_in = in_state.next_in;
-        pfile->stream.avail_in = in_state.avail_in;
+        /* Give back the input inflateBack9 did not consume */
+        pfile->stream.next_in = (uint8_t*)pfile->d64_stream.next_in;
+        pfile->stream.avail_in = pfile->d64_stream.avail_in;
 
+        /* inflateBack9 reports every callback failure as Z_BUF_ERROR, so the
+           flags set by d64_out_func tell the cases apart */
+        if (out_state.overflow)
+            return UNZ_BADZIPFILE;
+        if (out_state.cb_error)
+            return UNZ_ERRNO;
         if (err == Z_STREAM_END)
             return UNZ_EOF;
-        else if (err != Z_OK)
+        if (err == Z_BUF_ERROR)
+            return Z_DATA_ERROR;    /* ran out of input: truncated stream */
+        if (err != Z_OK)
             return err;
 
         return UNZ_OK;
@@ -1771,6 +1813,7 @@ extern int ZEXPORT unzReadCurrentFile(unzFile file, unzWriteCallback write_cb, v
         uint32_t out_size;
         const uint8_t *out_data;
         int cb_result;
+        int acct_err;
 
         /* Setup output buffer */
         pfile->stream.next_out = temp_buf;
@@ -1804,9 +1847,12 @@ extern int ZEXPORT unzReadCurrentFile(unzFile file, unzWriteCallback write_cb, v
                 pfile->stream.avail_in -= copy;
                 pfile->stream.next_out += copy;
                 pfile->stream.avail_out -= copy;
-                pfile->total_out_64 += copy;
-                pfile->rest_read_uncompressed -= copy;
-                pfile->crc32 = (uint32_t)crc32(pfile->crc32, temp_buf, copy);
+                acct_err = unzAccountOutput(pfile, temp_buf, copy);
+                if (acct_err != UNZ_OK)
+                {
+                    TRYFREE(temp_buf);
+                    return acct_err;
+                }
                 
                 out_data = temp_buf;
                 out_size = copy;
@@ -1842,9 +1888,12 @@ extern int ZEXPORT unzReadCurrentFile(unzFile file, unzWriteCallback write_cb, v
                 (((uint64_t)pfile->bstream.total_out_hi32) << 32);
 
             out_size = (uint32_t)(total_out_after - total_out_before);
-            pfile->total_out_64 += out_size;
-            pfile->rest_read_uncompressed -= out_size;
-            pfile->crc32 = crc32(pfile->crc32, buf_before, out_size);
+            acct_err = unzAccountOutput(pfile, buf_before, out_size);
+            if (acct_err != UNZ_OK)
+            {
+                TRYFREE(temp_buf);
+                return acct_err;
+            }
 
             pfile->stream.next_in = (uint8_t*)pfile->bstream.next_in;
             pfile->stream.avail_in = pfile->bstream.avail_in;
@@ -1957,9 +2006,12 @@ extern int ZEXPORT unzReadCurrentFile(unzFile file, unzWriteCallback write_cb, v
             pfile->stream.next_out += out_bytes;
             pfile->stream.avail_out -= (uInt)out_bytes;
 
-            pfile->total_out_64 += out_bytes;
-            pfile->rest_read_uncompressed -= out_bytes;
-            pfile->crc32 = (uint32_t)crc32(pfile->crc32, buf_before, (uint32_t)out_bytes);
+            acct_err = unzAccountOutput(pfile, buf_before, (uint32_t)out_bytes);
+            if (acct_err != UNZ_OK)
+            {
+                TRYFREE(temp_buf);
+                return acct_err;
+            }
 
             out_data = buf_before;
             out_size = (uint32_t)out_bytes;
@@ -2033,9 +2085,12 @@ extern int ZEXPORT unzReadCurrentFile(unzFile file, unzWriteCallback write_cb, v
             pfile->stream.next_out += out_bytes;
             pfile->stream.avail_out -= (uInt)out_bytes;
 
-            pfile->total_out_64 += out_bytes;
-            pfile->rest_read_uncompressed -= out_bytes;
-            pfile->crc32 = (uint32_t)crc32(pfile->crc32, buf_before, (uint32_t)out_bytes);
+            acct_err = unzAccountOutput(pfile, buf_before, (uint32_t)out_bytes);
+            if (acct_err != UNZ_OK)
+            {
+                TRYFREE(temp_buf);
+                return acct_err;
+            }
 
             out_data = buf_before;
             out_size = (uint32_t)out_bytes;
@@ -2104,9 +2159,12 @@ extern int ZEXPORT unzReadCurrentFile(unzFile file, unzWriteCallback write_cb, v
 
             pfile->zstd_state.wrPos = pfile->zstd_state.winPos;
 
-            pfile->total_out_64 += out_size;
-            pfile->rest_read_uncompressed -= out_size;
-            pfile->crc32 = (uint32_t)crc32(pfile->crc32, out_data, out_size);
+            acct_err = unzAccountOutput(pfile, out_data, out_size);
+            if (acct_err != UNZ_OK)
+            {
+                TRYFREE(temp_buf);
+                return acct_err;
+            }
 
             if (pfile->rest_read_uncompressed == 0)
             {
@@ -2229,9 +2287,12 @@ extern int ZEXPORT unzReadCurrentFile(unzFile file, unzWriteCallback write_cb, v
             pfile->stream.next_out += decoded;
             pfile->stream.avail_out -= decoded;
 
-            pfile->total_out_64 += decoded;
-            pfile->rest_read_uncompressed -= decoded;
-            pfile->crc32 = (uint32_t)crc32(pfile->crc32, buf_before, decoded);
+            acct_err = unzAccountOutput(pfile, buf_before, decoded);
+            if (acct_err != UNZ_OK)
+            {
+                TRYFREE(temp_buf);
+                return acct_err;
+            }
 
             out_data = buf_before;
             out_size = decoded;
@@ -2275,9 +2336,12 @@ extern int ZEXPORT unzReadCurrentFile(unzFile file, unzWriteCallback write_cb, v
                 total_out_after += ((uint64_t)1 << 32);
             
             out_size = (uint32_t)(total_out_after - total_out_before);
-            pfile->total_out_64 += out_size;
-            pfile->rest_read_uncompressed -= out_size;
-            pfile->crc32 = (uint32_t)crc32(pfile->crc32, buf_before, out_size);
+            acct_err = unzAccountOutput(pfile, buf_before, out_size);
+            if (acct_err != UNZ_OK)
+            {
+                TRYFREE(temp_buf);
+                return acct_err;
+            }
 
             out_data = buf_before;
 

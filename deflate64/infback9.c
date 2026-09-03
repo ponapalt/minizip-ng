@@ -10,6 +10,22 @@
 
 #define WSIZE 65536UL
 
+/* Default memory allocation functions, used when the caller leaves zalloc or
+   zfree at zero.  They live here rather than in zutil_compat.h so that
+   inftree9.c does not pick up two unused static functions. */
+static voidpf zcalloc(voidpf opaque, unsigned items, unsigned size)
+{
+    (void)opaque;
+    return sizeof(uInt) > 2 ? (voidpf)malloc(items * size) :
+                              (voidpf)calloc(items, size);
+}
+
+static void zcfree(voidpf opaque, voidpf ptr)
+{
+    (void)opaque;
+    free(ptr);
+}
+
 /*
    strm provides memory allocation functions in zalloc and zfree, or
    Z_NULL to use the library memory allocation functions.

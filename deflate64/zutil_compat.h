@@ -20,20 +20,6 @@
 #define zmemcpy memcpy
 #define zmemzero(dest, len) memset(dest, 0, len)
 
-/* Default memory allocation functions */
-static voidpf zcalloc(voidpf opaque, unsigned items, unsigned size)
-{
-    (void)opaque;
-    return sizeof(uInt) > 2 ? (voidpf)malloc(items * size) :
-                              (voidpf)calloc(items, size);
-}
-
-static void zcfree(voidpf opaque, voidpf ptr)
-{
-    (void)opaque;
-    free(ptr);
-}
-
 /* Debug trace macros - disabled by default */
 #ifndef ZLIB_DEBUG
 #  define Tracev(x)

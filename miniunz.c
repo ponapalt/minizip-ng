@@ -160,12 +160,22 @@ int miniunz_list(unzFile uf)
     return 0;
 }
 
+/* Write callback handed to unzReadCurrentFile: opaque is the output FILE* */
+static int miniunz_write_cb(void *opaque, const void *buf, uint32_t len)
+{
+    FILE *fout = (FILE *)opaque;
+
+    if (len == 0)
+        return 0;
+    if (fwrite(buf, len, 1, fout) != 1)
+        return -1;
+    return 0;
+}
+
 int miniunz_extract_currentfile(unzFile uf, int opt_extract_without_path, int *popt_overwrite, const char *password)
 {
     unz_file_info64 file_info = {0};
     FILE* fout = NULL;
-    void* buf = NULL;
-    uint16_t size_buf = 8192;
     int err = UNZ_OK;
     int errclose = UNZ_OK;
     int skip = 0;
@@ -198,13 +208,6 @@ int miniunz_extract_currentfile(unzFile uf, int opt_extract_without_path, int *p
             MKDIR(filename_inzip);
         }
         return err;
-    }
-
-    buf = (void*)malloc(size_buf);
-    if (buf == NULL)
-    {
-        printf("Error allocating memory\n");
-        return UNZ_INTERNALERROR;
     }
 
     err = unzOpenCurrentFilePassword(uf, password);
@@ -270,32 +273,19 @@ int miniunz_extract_currentfile(unzFile uf, int opt_extract_without_path, int *p
             printf("error opening %s\n", write_filename);
     }
 
-    /* Read from the zip, unzip to buffer, and write to disk */
+    /* Read from the zip, unzip and write to disk */
     if (fout != NULL)
     {
         printf(" extracting: %s\n", write_filename);
 
-        do
-        {
-            err = unzReadCurrentFile(uf, buf, size_buf);
-            if (err < 0)
-            {
-                printf("error %d with zipfile in unzReadCurrentFile\n", err);
-                break;
-            }
-            if (err == 0)
-                break;
-            if (fwrite(buf, err, 1, fout) != 1)
-            {
-                printf("error %d in writing extracted file\n", errno);
-                err = UNZ_ERRNO;
-                break;
-            }
-        }
-        while (err > 0);
+        /* unzReadCurrentFile pushes the whole file through miniunz_write_cb */
+        err = unzReadCurrentFile(uf, miniunz_write_cb, fout);
+        if (err == UNZ_ERRNO)
+            printf("error %d in writing extracted file\n", errno);
+        else if (err != UNZ_OK)
+            printf("error %d with zipfile in unzReadCurrentFile\n", err);
 
-        if (fout)
-            fclose(fout);
+        fclose(fout);
 
         /* Set the time of the file that has been unzipped */
         if (err == 0)
@@ -306,7 +296,6 @@ int miniunz_extract_currentfile(unzFile uf, int opt_extract_without_path, int *p
     if (errclose != UNZ_OK)
         printf("error %d with zipfile in unzCloseCurrentFile\n", errclose);
 
-    free(buf);
     return err;
 }
 
