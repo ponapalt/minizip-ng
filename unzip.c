@@ -1533,8 +1533,11 @@ static int unzRefillInputBuffer(unzFile file)
     bytes_read = 0;
     total_bytes_read = 0;
 
+    /* avail_in is the amount still unread, next_in points at it. Deriving the
+       leftover from UNZ_BUFSIZE instead would be wrong after a partial fill,
+       because the buffer is not filled to UNZ_BUFSIZE near the end of an entry */
     if (pfile->stream.next_in != NULL)
-        bytes_not_read = (uint32_t)(pfile->read_buffer + UNZ_BUFSIZE - pfile->stream.next_in);
+        bytes_not_read = (uint32_t)pfile->stream.avail_in;
     bytes_to_read -= bytes_not_read;
     if (bytes_not_read > 0)
         memmove(pfile->read_buffer, pfile->stream.next_in, bytes_not_read);
@@ -1572,10 +1575,15 @@ static int unzRefillInputBuffer(unzFile file)
 #ifndef NOUNCRYPT
     if ((s->cur_file_info.flag & 1) != 0)
     {
+        /* Only the bytes just read are still encrypted: the leftover moved to
+           the front of the buffer was decrypted by an earlier call, and both
+           ciphers are stateful, so decrypting it twice would corrupt it and
+           desynchronise the key stream */
+        uint8_t *fresh = pfile->read_buffer + bytes_not_read;
 #ifdef HAVE_AES
         if (s->cur_file_info.compression_method == AES_METHOD)
         {
-            fcrypt_decrypt(pfile->read_buffer, bytes_to_read, &pfile->aes_ctx);
+            fcrypt_decrypt(fresh, total_bytes_read, &pfile->aes_ctx);
         }
         else
 #endif
@@ -1583,7 +1591,7 @@ static int unzRefillInputBuffer(unzFile file)
         {
             uint32_t i;
             for (i = 0; i < total_bytes_read; i++)
-                pfile->read_buffer[i] = zdecode(s->keys, s->pcrc_32_tab, pfile->read_buffer[i]);
+                fresh[i] = zdecode(s->keys, s->pcrc_32_tab, fresh[i]);
         }
     }
 #endif

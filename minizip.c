@@ -56,7 +56,9 @@ void minizip_help()
            "  -0  Store only\n" \
            "  -1  Compress faster\n" \
            "  -9  Compress better\n\n" \
-           "  -j  exclude path. store only the file name.\n\n");
+           "  -j  exclude path. store only the file name.\n\n" \
+           "  -p  takes its argument either attached (-ppassword)\n" \
+           "      or as the next argument (-p password)\n\n");
 }
 
 int minizip_addfile(zipFile zf, const char *path, const char *filenameinzip, int level, const char *password)
@@ -176,10 +178,27 @@ int main(int argc, char *argv[])
                 if ((c == 'j') || (c == 'J'))
                     opt_exclude_path = 1;
 
-                if (((c == 'p') || (c == 'P')) && (i+1 < argc))
+                if ((c == 'p') || (c == 'P'))
                 {
-                    password=argv[i+1];
-                    i++;
+                    /* Both "-p password" and "-ppassword" are accepted. The
+                       attached form has to consume the rest of the argument,
+                       otherwise digits in the password would be mistaken for
+                       a compression level */
+                    if (*p != 0)
+                    {
+                        password = p;
+                        p += strlen(p);
+                    }
+                    else if (i+1 < argc)
+                    {
+                        password = argv[i+1];
+                        i++;
+                    }
+                    else
+                    {
+                        printf("Option -p requires a password\n");
+                        return 1;
+                    }
                 }
             }
         }

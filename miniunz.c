@@ -56,7 +56,9 @@ void miniunz_help()
            "  -l  list files\n" \
            "  -d  directory to extract into\n" \
            "  -o  overwrite files without prompting\n" \
-           "  -p  extract crypted file using password\n\n");
+           "  -p  extract crypted file using password\n\n" \
+           "  -d and -p take their argument either attached (-ddir, -ppassword)\n" \
+           "  or as the next argument (-d dir, -p password)\n\n");
 }
 
 int miniunz_list(unzFile uf)
@@ -383,14 +385,43 @@ int main(int argc, const char *argv[])
                     opt_overwrite = 1;
                 if ((c == 'd') || (c == 'D'))
                 {
+                    /* Both "-d dir" and "-ddir" are accepted */
+                    if (*p != 0)
+                    {
+                        dirname = p;
+                        p += strlen(p);
+                    }
+                    else if (i+1 < argc)
+                    {
+                        dirname = argv[i+1];
+                        i++;
+                    }
+                    else
+                    {
+                        printf("Option -d requires a directory name\n");
+                        return 1;
+                    }
                     opt_extractdir = 1;
-                    dirname = argv[i+1];
                 }
 
-                if (((c == 'p') || (c == 'P')) && (i+1 < argc))
+                if ((c == 'p') || (c == 'P'))
                 {
-                    password = argv[i+1];
-                    i++;
+                    /* Both "-p password" and "-ppassword" are accepted */
+                    if (*p != 0)
+                    {
+                        password = p;
+                        p += strlen(p);
+                    }
+                    else if (i+1 < argc)
+                    {
+                        password = argv[i+1];
+                        i++;
+                    }
+                    else
+                    {
+                        printf("Option -p requires a password\n");
+                        return 1;
+                    }
                 }
             }
         }
@@ -398,7 +429,7 @@ int main(int argc, const char *argv[])
         {
             if (zipfilename == NULL)
                 zipfilename = argv[i];
-            else if ((filename_to_extract == NULL) && (!opt_extractdir))
+            else if (filename_to_extract == NULL)
                 filename_to_extract = argv[i];
         }
     }
