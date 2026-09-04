@@ -43,7 +43,7 @@
 #endif
 
 #ifdef HAVE_DEFLATE64
-#  include "deflate64/infback9.h"
+#  include "infback9.h"
 #endif
 
 #ifdef HAVE_XZ
