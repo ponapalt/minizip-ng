@@ -131,7 +131,7 @@ voidpf ZCALLBACK win32_open64_file_func(voidpf opaque, const void *filename, int
     iowin = win32_build_iowin(hFile);
     if (iowin == NULL)
         return NULL;
-    iowin->filenameLength = _tcslen(filename) + 1;
+    iowin->filenameLength = (int)_tcslen(filename) + 1;
     iowin->filename = (void*)malloc(iowin->filenameLength * sizeof(TCHAR));
     _tcsncpy(iowin->filename, filename, iowin->filenameLength);
     return iowin; 
@@ -159,7 +159,7 @@ voidpf ZCALLBACK win32_open64_file_funcA(voidpf opaque, const void *filename, in
     iowin = win32_build_iowin(hFile);
     if (iowin == NULL)
         return NULL;
-    iowin->filenameLength = strlen(filename) + 1;
+    iowin->filenameLength = (int)strlen(filename) + 1;
     iowin->filename = (void*)malloc(iowin->filenameLength * sizeof(char));
     strncpy(iowin->filename, filename, iowin->filenameLength);
     return iowin;
@@ -187,7 +187,7 @@ voidpf ZCALLBACK win32_open64_file_funcW(voidpf opaque, const void *filename, in
         return NULL;
     if (iowin->filename == NULL)
     {
-        iowin->filenameLength = wcslen(filename) + 1;
+        iowin->filenameLength = (int)wcslen(filename) + 1;
         iowin->filename = (void*)malloc(iowin->filenameLength * sizeof(WCHAR));
         wcsncpy(iowin->filename, filename, iowin->filenameLength);
     }
@@ -220,7 +220,7 @@ voidpf ZCALLBACK win32_open_file_func(voidpf opaque, const char *filename, int m
     iowin = win32_build_iowin(hFile);
     if (iowin == NULL)
         return NULL;
-    iowin->filenameLength = _tcslen((TCHAR*)filename) + 1;
+    iowin->filenameLength = (int)_tcslen((TCHAR*)filename) + 1;
     iowin->filename = (void*)malloc(iowin->filenameLength * sizeof(TCHAR));
     _tcsncpy(iowin->filename, (TCHAR*)filename, iowin->filenameLength);
     return iowin; 
